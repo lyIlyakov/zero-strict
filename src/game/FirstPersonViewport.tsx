@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import {
@@ -15,6 +15,8 @@ import {
 } from '../../shared/mapData';
 import type { RoomId, RoomSnapshot, TaskTypeId } from '../../shared/types';
 import { soundEngine } from './sound';
+import { TouchJoystick, useTouchAvailable } from './TouchJoystick';
+import { createTouchControls, JOYSTICK_TRAVEL } from './touchControls';
 import {
   buildStation3D,
   createDownedBeaconMesh,
@@ -38,6 +40,7 @@ export interface ViewportHudTelemetry {
   nearbyBodyId: string | null;
   nearbyAttackTarget: { id: string; name: string } | null;
   pointerLocked: boolean;
+  graphicsUnavailable: boolean;
 }
 
 export interface RemoteMotionUpdate {
@@ -49,8 +52,10 @@ export interface RemoteMotionUpdate {
 }
 
 interface FirstPersonViewportProps {
-  mode: 'menu' | 'lobby' | 'playing' | 'meeting' | 'ended';
-  snapshot: RoomSnapshot | null;
+  mode: RoomSnapshot['phase'];
+  snapshot: RoomSnapshot;
+  gateStartedAt: number | null;
+  onGateOpened: () => void;
   panelOpen: boolean;
   sensitivity: number;
   remoteMotionRef: React.MutableRefObject<Map<string, RemoteMotionUpdate>>;
@@ -60,6 +65,8 @@ interface FirstPersonViewportProps {
   onReportBody: (bodyId: string) => void;
   onActivateShield: () => void;
   onAttackTarget: (targetId: string) => void;
+  onSabotageLights: () => void;
+  onToggleMute: () => void;
   onToggleMap: () => void;
   onTogglePause: () => void;
 }
@@ -78,90 +85,56 @@ function detectSoftwareGl(): boolean {
   }
 }
 
-export function FirstPersonViewport({
-  mode,
-  snapshot,
-  panelOpen,
-  sensitivity,
-  remoteMotionRef,
-  onSendMove,
-  onTelemetryChange,
-  onInteract,
-  onReportBody,
-  onActivateShield,
-  onAttackTarget,
-  onToggleMap,
-  onTogglePause,
-}: FirstPersonViewportProps) {
+export function FirstPersonViewport(props: FirstPersonViewportProps) {
+  const { mode, snapshot, panelOpen, gateStartedAt, remoteMotionRef } = props;
   const mountRef = useRef<HTMLDivElement | null>(null);
-
-  // Store latest React props & callbacks in refs so WebGL mounts ONCE and never resets
-  const propsRef = useRef({
-    mode,
-    snapshot,
-    panelOpen,
-    sensitivity,
-    onSendMove,
-    onTelemetryChange,
-    onInteract,
-    onReportBody,
-    onActivateShield,
-    onAttackTarget,
-    onToggleMap,
-    onTogglePause,
-  });
-  propsRef.current = {
-    mode,
-    snapshot,
-    panelOpen,
-    sensitivity,
-    onSendMove,
-    onTelemetryChange,
-    onInteract,
-    onReportBody,
-    onActivateShield,
-    onAttackTarget,
-    onToggleMap,
-    onTogglePause,
-  };
-
-  // Release pointer lock automatically whenever any overlay panel or non-playing screen opens
-  useEffect(() => {
-    if (mode !== 'playing' || panelOpen) {
-      if (document.pointerLockElement) {
-        document.exitPointerLock?.();
-      }
-    }
-  }, [mode, panelOpen]);
+  const knobRef = useRef<HTMLSpanElement | null>(null);
+  const resetInputRef = useRef<(() => void) | null>(null);
+  const touchAvailable = useTouchAvailable();
+  const [graphicsUnavailable, setGraphicsUnavailable] = useState(false);
+  const propsRef = useRef(props);
+  useLayoutEffect(() => { propsRef.current = props; });
+  useLayoutEffect(() => {
+    resetInputRef.current?.();
+  }, [mode, panelOpen, gateStartedAt, snapshot.self.playerId]);
 
   useEffect(() => {
     const container = mountRef.current;
     if (!container) return;
 
+    const canvas = document.createElement('canvas');
     const isSoftwareGl = detectSoftwareGl();
-
-    const renderer = new THREE.WebGLRenderer({
-      antialias: !isSoftwareGl,
-      powerPreference: 'high-performance',
-    });
-    renderer.outputColorSpace = THREE.SRGBColorSpace;
-    renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.12;
-    renderer.setPixelRatio(isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 2));
-    renderer.shadowMap.enabled = !isSoftwareGl;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-    renderer.setSize(container.clientWidth || window.innerWidth, container.clientHeight || window.innerHeight);
-    container.appendChild(renderer.domElement);
+    let renderer: THREE.WebGLRenderer | null = null;
+    try {
+      renderer = new THREE.WebGLRenderer({ canvas, antialias: !isSoftwareGl, powerPreference: 'high-performance' });
+    } catch {
+      setGraphicsUnavailable(true);
+    }
+    if (renderer) {
+      renderer.outputColorSpace = THREE.SRGBColorSpace;
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 1.12;
+      renderer.setPixelRatio(isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 2));
+      renderer.shadowMap.enabled = !isSoftwareGl;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      renderer.setSize(container.clientWidth || window.innerWidth, container.clientHeight || window.innerHeight);
+      container.prepend(canvas);
+    }
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x090e16);
     const fog = new THREE.FogExp2(0x090e16, 0.022);
     scene.fog = fog;
 
-    const pmremGenerator = new THREE.PMREMGenerator(renderer);
-    const envTex = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
-    scene.environment = envTex;
-    pmremGenerator.dispose();
+    let environment: THREE.WebGLRenderTarget | undefined;
+    if (renderer) {
+      const pmrem = new THREE.PMREMGenerator(renderer);
+      const room = new RoomEnvironment();
+      environment = pmrem.fromScene(room, 0.04);
+      scene.environment = environment.texture;
+      room.dispose();
+      pmrem.dispose();
+    }
 
     const camera = new THREE.PerspectiveCamera(
       72,
@@ -193,23 +166,20 @@ export function FirstPersonViewport({
     camera.add(headLamp);
     scene.add(camera);
 
-    const maxAniso = renderer.capabilities.getMaxAnisotropy();
-    const station = buildStation3D(maxAniso);
-    scene.add(station.root);
-
-    if (!isSoftwareGl) {
-      renderer.compile(scene, camera);
-    }
+    const station = renderer && buildStation3D(renderer.capabilities.getMaxAnisotropy());
+    if (station) scene.add(station.root);
+    if (!isSoftwareGl) renderer?.compile(scene, camera);
 
     // Dynamic actors & bodies
-    const avatars = new Map<string, PlayerAvatarRig>();
+    const avatars = new Map<string, { rig: PlayerAvatarRig; skin: RoomSnapshot['players'][number]['skin']; color: string; name: string }>();
     const avatarPositions = new Map<string, { x: number; z: number; yaw: number; walkPhase: number }>();
     const bodyMeshes = new Map<string, { group: THREE.Group; dispose: () => void }>();
 
     // Local first-person physics state
     const localPos = { x: 0, z: 3.1, yaw: Math.PI, pitch: 0 };
     let lastSyncedRound = -1;
-    let lastSyncedPhase = '';
+    let lastSyncedPhase: RoomSnapshot['phase'] | null = null;
+    let wasConnected = false;
     let lastMoveEmitAt = 0;
     let lastTelemetryEmitAt = 0;
     let walkBobTime = 0;
@@ -223,107 +193,165 @@ export function FirstPersonViewport({
     const _right = new THREE.Vector3();
     const _euler = new THREE.Euler(0, 0, 0, 'YXZ');
 
-    // Menu flyover waypoints showcasing Command Hall table, terminals, and directional signage
-    const flyPoints = [
-      new THREE.Vector3(-4.2, 2.15, 3.8),
-      new THREE.Vector3(4.2, 2.15, 3.8),
-      new THREE.Vector3(4.2, 2.05, -3.6),
-      new THREE.Vector3(-4.2, 2.05, -3.6),
-    ];
-
+    const touch = createTouchControls();
+    const captures = new Set<number>();
+    let contextLost = false;
+    const syncKnob = () => {
+      const knob = knobRef.current;
+      if (knob) knob.style.transform = `translate(${touch.movement.x * JOYSTICK_TRAVEL}px, ${-touch.movement.z * JOYSTICK_TRAVEL}px)`;
+    };
+    const releaseLock = () => {
+      if (document.pointerLockElement === canvas) document.exitPointerLock?.();
+    };
+    const resetInput = () => {
+      keys.clear();
+      touch.reset();
+      for (const id of captures) {
+        if (container.hasPointerCapture(id)) container.releasePointerCapture(id);
+      }
+      captures.clear();
+      syncKnob();
+      releaseLock();
+    };
+    resetInputRef.current = resetInput;
+    const inputAllowed = () => {
+      const { mode: m, panelOpen: po, gateStartedAt: gate, snapshot: snap } = propsRef.current;
+      return (m === 'playing' || m === 'lobby') && !po && gate === null &&
+        snap.players.some((p) => p.id === snap.self.playerId && p.connected);
+    };
     const onContextLost = (e: Event) => {
       e.preventDefault();
+      contextLost = true;
+      sync = null;
+      setGraphicsUnavailable(true);
+      resetInput();
     };
-    renderer.domElement.addEventListener('webglcontextlost', onContextLost);
+    const onContextRestored = () => {
+      contextLost = false;
+      setGraphicsUnavailable(false);
+    };
+    canvas.addEventListener('webglcontextlost', onContextLost);
+    canvas.addEventListener('webglcontextrestored', onContextRestored);
 
-    const onCanvasClick = () => {
-      const { mode: m, panelOpen: po } = propsRef.current;
-      if (m === 'playing' && !po && document.pointerLockElement !== renderer.domElement) {
-        renderer.domElement.requestPointerLock?.();
+    const onPointerDown = (e: PointerEvent) => {
+      if (!inputAllowed()) return;
+      if (e.pointerType === 'touch') {
+        const joystick = (e.target as Element).closest('[data-joystick]');
+        const bounds = container.getBoundingClientRect();
+        const kind = joystick ? 'move' : e.clientX >= bounds.left + bounds.width / 2 ? 'look' : null;
+        if (kind && touch.start(kind, e.pointerId, e.clientX, e.clientY)) {
+          captures.add(e.pointerId);
+          container.setPointerCapture(e.pointerId);
+        }
+      } else if (e.pointerType === 'mouse' && e.button === 0 && e.target === canvas && !pointerLocked && !contextLost) {
+        (document.activeElement as HTMLElement | null)?.blur();
+        try {
+          // Browser implementations can return a Promise or void.
+          void canvas.requestPointerLock?.()?.catch(() => { /* Keyboard look remains available. */ });
+        } catch {
+          // Pointer lock is optional in embedded browsers.
+        }
       }
     };
-    renderer.domElement.addEventListener('click', onCanvasClick);
+    const onPointerMove = (e: PointerEvent) => {
+      if (!captures.has(e.pointerId) || !inputAllowed()) return;
+      touch.move(e.pointerId, e.clientX, e.clientY);
+      syncKnob();
+    };
+    const onPointerEnd = (e: PointerEvent) => {
+      if (!captures.delete(e.pointerId)) return;
+      touch.end(e.pointerId);
+      if (e.type !== 'pointerup') touch.takeLook();
+      syncKnob();
+    };
+    container.addEventListener('pointerdown', onPointerDown);
+    container.addEventListener('pointermove', onPointerMove);
+    container.addEventListener('pointerup', onPointerEnd);
+    container.addEventListener('pointercancel', onPointerEnd);
+    container.addEventListener('lostpointercapture', onPointerEnd);
 
     const onPointerLockChange = () => {
-      pointerLocked = document.pointerLockElement === renderer.domElement;
-      if (!pointerLocked) {
-        keys.clear();
-      }
+      pointerLocked = document.pointerLockElement === canvas;
+      if (pointerLocked && !inputAllowed()) releaseLock();
+      if (!pointerLocked) keys.clear();
     };
     document.addEventListener('pointerlockchange', onPointerLockChange);
 
+    const turn = (dx: number, dy: number, scale: number) => {
+      const factor = scale * propsRef.current.sensitivity;
+      localPos.yaw -= dx * factor;
+      localPos.pitch = THREE.MathUtils.clamp(localPos.pitch - dy * factor, -Math.PI * 0.42, Math.PI * 0.42);
+    };
     const onMouseMove = (e: MouseEvent) => {
-      const { mode: m, panelOpen: po, sensitivity: sens } = propsRef.current;
-      if (m !== 'playing' || po) return;
-      if (document.pointerLockElement !== renderer.domElement) return;
-      const factor = 0.0021 * sens;
-      localPos.yaw -= e.movementX * factor;
-      localPos.pitch = THREE.MathUtils.clamp(
-        localPos.pitch - e.movementY * factor,
-        -Math.PI * 0.42,
-        Math.PI * 0.42,
-      );
+      if (inputAllowed() && document.pointerLockElement === canvas) turn(e.movementX, e.movementY, 0.0021);
     };
     window.addEventListener('mousemove', onMouseMove);
 
+    const movementKeys = new Set([
+      'KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'KeyI', 'KeyK',
+    ]);
     const onKeyDown = (e: KeyboardEvent) => {
-      // Ignore keyboard shortcuts when typing in an input/textarea
-      const tag = (e.target as HTMLElement | null)?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
-
-      const { mode: m, panelOpen: po } = propsRef.current;
-
-      if (e.code === 'Tab' && m === 'playing') {
+      const p = propsRef.current;
+      if (e.defaultPrevented || e.isComposing || e.altKey || e.ctrlKey || e.metaKey) return;
+      if (e.code === 'Tab') releaseLock(); // Keep native focus traversal, including in panels.
+      if (p.mode === 'playing' && e.code === 'Escape') {
+        if (!e.repeat && p.gateStartedAt === null) p.onTogglePause();
+        return;
+      }
+      if ((e.target as HTMLElement | null)?.closest('input, textarea, select, [contenteditable]')) return;
+      if (p.mode === 'playing' && p.gateStartedAt === null && e.code === 'KeyM') {
+        if (!e.repeat) p.onToggleMap();
+        return;
+      }
+      if (p.mode === 'playing' && p.gateStartedAt === null && e.code === 'KeyP') {
+        if (!e.repeat) p.onTogglePause();
+        return;
+      }
+      if (!inputAllowed()) return;
+      if (movementKeys.has(e.code)) {
         e.preventDefault();
-        propsRef.current.onToggleMap();
+        if (!e.repeat) keys.add(e.code);
         return;
       }
+      if (e.repeat || p.mode !== 'playing') return;
 
-      if (e.code === 'Escape' && m === 'playing') {
-        if (po) {
-          propsRef.current.onTogglePause();
-        } else if (!document.pointerLockElement) {
-          propsRef.current.onTogglePause();
-        }
-        return;
-      }
-
-      if (m !== 'playing' || po) return;
-
-      keys.add(e.code);
-
-      if (e.repeat) return;
-
+      const snap = p.snapshot;
+      const alive = snap.players.some((player) => player.id === snap.self.playerId && player.status === 'alive');
+      const now = Date.now();
+      updateInteractions(snap, localPos.x, localPos.z);
       if (e.code === 'KeyE' && lastNearbyInteraction) {
-        propsRef.current.onInteract(lastNearbyInteraction);
+        p.onInteract(lastNearbyInteraction);
       } else if (e.code === 'KeyR' && lastNearbyBodyId) {
-        propsRef.current.onReportBody(lastNearbyBodyId);
-      } else if (e.code === 'KeyQ') {
-        propsRef.current.onActivateShield();
-      } else if (e.code === 'KeyF' && lastAttackTarget) {
-        propsRef.current.onAttackTarget(lastAttackTarget.id);
+        p.onReportBody(lastNearbyBodyId);
+      } else if (e.code === 'KeyQ' && alive && snap.self.role === 'crew' && snap.shieldUnlocked && snap.self.shieldCharge > 0 && snap.self.shieldActiveUntil <= now) {
+        p.onActivateShield();
+      } else if (e.code === 'KeyF' && lastAttackTarget && snap.self.killCooldownUntil <= now) {
+        p.onAttackTarget(lastAttackTarget.id);
+      } else if (e.code === 'KeyL' && alive && snap.self.role === 'saboteur' && !snap.lightsOut && snap.self.sabotageCooldownUntil <= now) {
+        p.onSabotageLights();
+      } else if (e.code === 'KeyV') {
+        p.onToggleMute();
       }
     };
-
-    const onKeyUp = (e: KeyboardEvent) => {
-      keys.delete(e.code);
+    const onKeyUp = (e: KeyboardEvent) => { keys.delete(e.code); };
+    const onFocusIn = (e: FocusEvent) => {
+      // Keyboard focus can move to HUD controls as well as modal fields. In either
+      // case, release held movement/look before the next frame can apply it.
+      if (!container.contains(e.target as Node | null)) resetInput();
     };
-
-    const onBlur = () => {
-      keys.clear();
-    };
-
+    const onVisibilityChange = () => { if (document.hidden) resetInput(); };
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
-    window.addEventListener('blur', onBlur);
+    window.addEventListener('blur', resetInput);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    document.addEventListener('focusin', onFocusIn);
 
     const onResize = () => {
       const w = container.clientWidth || window.innerWidth;
       const h = container.clientHeight || window.innerHeight;
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
-      renderer.setSize(w, h);
-      renderer.render(scene, camera);
+      renderer?.setSize(w, h);
     };
     window.addEventListener('resize', onResize);
 
@@ -389,7 +417,7 @@ export function FirstPersonViewport({
       }
 
       // Command Hall emergency button (alive only, blocked during blackout)
-      if (isAlive && !snap.lightsOut && !snap.self.emergencyUsed) {
+      if (isAlive && snap.settings?.emergencyEnabled !== false && !snap.lightsOut && !snap.self.emergencyUsed) {
         const emerTerm = TERMINALS.find((t) => t.id === 'cmd_emergency');
         if (emerTerm) {
           const d = distance2D(myX, myZ, emerTerm.x, emerTerm.z);
@@ -446,138 +474,82 @@ export function FirstPersonViewport({
     let lastTime = performance.now();
     const startTime = lastTime;
 
-    function afterDraw(cb: () => void) {
-      const gl = renderer.getContext() as WebGL2RenderingContext;
-      const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
-      gl.flush();
-      const poll = () => {
-        if (disposed) return;
-        const state = sync && gl.getSyncParameter(sync, gl.SYNC_STATUS);
-        if (state === gl.UNSIGNALED) {
-          frameId = window.setTimeout(poll, 5);
-        } else {
-          if (sync) gl.deleteSync(sync);
-          frameId = window.setTimeout(cb, 80);
-        }
-      };
-      frameId = window.setTimeout(poll, 5);
-    }
-
+    let sync: WebGLSync | null = null;
+    let lastGateProgress = -1;
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const gateDuration = reducedMotion ? 180 : 1200;
     function tick() {
       if (disposed) return;
 
       const now = performance.now();
-      const dt = Math.min(0.05, Math.max(0.001, (now - lastTime) / 1000));
+      const dt = Math.min(0.1, Math.max(0.001, (now - lastTime) / 1000));
       lastTime = now;
       const elapsed = (now - startTime) / 1000;
+      const { mode: curMode, snapshot: snap, gateStartedAt: gate } = propsRef.current;
+      const me = snap.players.find((p) => p.id === snap.self.playerId);
+      const lobby = curMode === 'lobby';
+      const connected = me?.connected ?? false;
+      if (me && (snap.roundNumber !== lastSyncedRound || lastSyncedPhase !== curMode || (!wasConnected && connected))) {
+        localPos.x = me.x;
+        localPos.z = me.z;
+        localPos.yaw = me.yaw;
+        localPos.pitch = 0;
+        lastSyncedRound = snap.roundNumber;
+        avatarPositions.clear();
+      }
+      if (wasConnected && !connected) resetInput();
+      wasConnected = connected;
+      lastSyncedPhase = curMode;
 
-      const { mode: curMode, snapshot: snap, panelOpen: po } = propsRef.current;
+      const gateProgress = lobby ? 0 : curMode === 'playing' && gate !== null
+        ? Math.min(1, Math.max(0, (now - gate) / gateDuration)) : 1;
+      if (gateProgress !== lastGateProgress) {
+        station?.setGate(gateProgress * gateProgress * (3 - 2 * gateProgress));
+        lastGateProgress = gateProgress;
+      }
+      if (gate !== null && gateProgress >= 1) propsRef.current.onGateOpened();
 
-      // Animate station landmarks (reactor rings, etc.)
-      for (const anim of station.animatedProps) {
-        anim(elapsed, dt);
+      let moving = false;
+      const look = touch.takeLook();
+      if (inputAllowed() && me) {
+        const keyAxis = (positive: boolean, negative: boolean) => Number(positive) - Number(negative);
+        turn(look.x, look.y, 0.005);
+        localPos.yaw += keyAxis(keys.has('ArrowLeft'), keys.has('ArrowRight')) * 2.1 * dt;
+        turn(0, keyAxis(keys.has('KeyK'), keys.has('KeyI')) * 750 * dt, 0.0021);
+        localPos.yaw = Math.atan2(Math.sin(localPos.yaw), Math.cos(localPos.yaw));
+
+        const moveZ = touch.movement.z + keyAxis(keys.has('KeyW') || keys.has('ArrowUp'), keys.has('KeyS') || keys.has('ArrowDown'));
+        const moveX = touch.movement.x + keyAxis(keys.has('KeyD'), keys.has('KeyA'));
+        if (moveZ || moveX) {
+          _forward.set(-Math.sin(localPos.yaw), 0, -Math.cos(localPos.yaw));
+          _right.set(Math.cos(localPos.yaw), 0, -Math.sin(localPos.yaw));
+          const isSlowed = snap.self.role === 'saboteur' && Date.now() < snap.self.slowedUntil;
+          const step = (isSlowed ? 3.2 : 6) * dt / Math.max(1, Math.hypot(moveZ, moveX));
+          const x = localPos.x + (_forward.x * moveZ + _right.x * moveX) * step;
+          const z = localPos.z + (_forward.z * moveZ + _right.z * moveX) * step;
+          const resolved = resolvePlayerMovement(localPos.x, localPos.z,
+            lobby ? THREE.MathUtils.clamp(x, -5.5, 5.5) : x,
+            lobby ? THREE.MathUtils.clamp(z, -5.5, 5.5) : z);
+          moving = Math.hypot(resolved.x - localPos.x, resolved.z - localPos.z) > 0.001;
+          localPos.x = resolved.x;
+          localPos.z = resolved.z;
+          if (moving) {
+            walkBobTime += dt * (isSlowed ? 6.5 : 10.5);
+            if (me.status === 'alive') soundEngine.playFootstep();
+          }
+        }
+        if (now - lastMoveEmitAt > 62) {
+          lastMoveEmitAt = now;
+          propsRef.current.onSendMove(localPos.x, localPos.z, localPos.yaw);
+        }
       }
 
-      if (curMode === 'menu' || curMode === 'lobby' || !snap) {
-        // Atmospheric flyover inside Command Hall for Title & Lobby
-        const t = (elapsed * 0.08) % flyPoints.length;
-        const i0 = Math.floor(t);
-        const i1 = (i0 + 1) % flyPoints.length;
-        const frac = t - i0;
-        const smooth = frac * frac * (3 - 2 * frac);
-        camera.position.lerpVectors(flyPoints[i0], flyPoints[i1], smooth);
-        camera.lookAt(-0.4, 1.2, -0.3);
+      const bobOffset = moving && !reducedMotion ? Math.sin(walkBobTime) * 0.025 : 0;
+      camera.position.set(localPos.x, PLAYER_EYE_HEIGHT + bobOffset, localPos.z);
+      camera.quaternion.setFromEuler(_euler.set(localPos.pitch, localPos.yaw, 0, 'YXZ'));
 
-        fog.density = THREE.MathUtils.damp(fog.density, 0.016, 4, dt);
-        hemiLight.intensity = THREE.MathUtils.damp(hemiLight.intensity, 1.35, 4, dt);
-        keyLight.intensity = THREE.MathUtils.damp(keyLight.intensity, 1.15, 4, dt);
-        headLamp.intensity = 2.0;
-        if (station.roomLights[0]) {
-          station.roomLights[0].position.set(0, 3.25, 0);
-          station.roomLights[0].color.set('#cfe8ff');
-          station.roomLights[0].intensity = 16;
-        }
-        if (station.roomLights[1]) {
-          station.roomLights[1].position.set(0, 3.1, -9);
-          station.roomLights[1].color.set('#2dd4bf');
-          station.roomLights[1].intensity = 12;
-        }
-      } else {
-        // Sync spawn teleport when round starts or resumes after meeting
-        const me = snap.players.find((p) => p.id === snap.self.playerId);
-        if (
-          me &&
-          (snap.roundNumber !== lastSyncedRound ||
-            (lastSyncedPhase === 'meeting' && snap.phase === 'playing') ||
-            (lastSyncedPhase !== 'playing' && snap.phase === 'playing'))
-        ) {
-          localPos.x = me.x;
-          localPos.z = me.z;
-          localPos.yaw = me.yaw;
-          localPos.pitch = 0;
-          lastSyncedRound = snap.roundNumber;
-        }
-        lastSyncedPhase = snap.phase;
-
-        // First-person WASD movement (blocked during overlays/meetings)
-        const canMove = curMode === 'playing' && !po && me && me.connected;
-        let moving = false;
-
-        if (canMove) {
-          // Arrow left/right fallback turning for desktop users without pointer lock
-          if (keys.has('ArrowLeft')) localPos.yaw += 2.1 * dt;
-          if (keys.has('ArrowRight')) localPos.yaw -= 2.1 * dt;
-
-          const moveZ =
-            (keys.has('KeyW') || keys.has('ArrowUp') ? 1 : 0) -
-            (keys.has('KeyS') || keys.has('ArrowDown') ? 1 : 0);
-          const moveX =
-            (keys.has('KeyD') ? 1 : 0) -
-            (keys.has('KeyA') ? 1 : 0);
-
-          if (moveZ !== 0 || moveX !== 0) {
-            moving = true;
-            _forward.set(-Math.sin(localPos.yaw), 0, -Math.cos(localPos.yaw));
-            _right.set(Math.cos(localPos.yaw), 0, -Math.sin(localPos.yaw));
-
-            const isSlowed =
-              snap.self.role === 'saboteur' && Date.now() < snap.self.slowedUntil;
-            const speed = isSlowed ? 3.2 : 6.0;
-
-            let dx = _forward.x * moveZ + _right.x * moveX;
-            let dz = _forward.z * moveZ + _right.z * moveX;
-            const len = Math.hypot(dx, dz) || 1;
-            dx = (dx / len) * speed * dt;
-            dz = (dz / len) * speed * dt;
-
-            const resolved = resolvePlayerMovement(
-              localPos.x,
-              localPos.z,
-              localPos.x + dx,
-              localPos.z + dz,
-            );
-            localPos.x = resolved.x;
-            localPos.z = resolved.z;
-
-            walkBobTime += dt * (isSlowed ? 6.5 : 10.5);
-            if (me.status === 'alive') {
-              soundEngine.playFootstep();
-            }
-          }
-
-          // Emit position at ~16Hz to authoritative server
-          if (now - lastMoveEmitAt > 62) {
-            lastMoveEmitAt = now;
-            propsRef.current.onSendMove(localPos.x, localPos.z, localPos.yaw);
-          }
-        }
-
-        // First-person camera with subtle head-bob synced to movement
-        const bobOffset = moving ? Math.sin(walkBobTime) * 0.045 : 0;
-        camera.position.set(localPos.x, PLAYER_EYE_HEIGHT + bobOffset, localPos.z);
-        _euler.set(localPos.pitch, localPos.yaw, 0, 'YXZ');
-        camera.quaternion.setFromEuler(_euler);
-
+      if (station && !contextLost) {
+        for (const anim of station.animatedProps) anim(elapsed, dt);
         // Blackout lighting & fog contrast (saboteur keeps slightly better night vision)
         const isBlackout = snap.lightsOut;
         const isSaboteur = snap.self.role === 'saboteur';
@@ -623,16 +595,18 @@ export function FirstPersonViewport({
           if (!viewerIsObserver && p.status === 'eliminated') continue;
           activeIds.add(p.id);
 
-          let rig = avatars.get(p.id);
-          if (!rig || rig.color !== p.color) {
+          const cached = avatars.get(p.id);
+          let rig = cached?.rig;
+          if (!cached || cached.color !== p.color || cached.skin !== p.skin || cached.name !== p.name) {
             if (rig) {
               scene.remove(rig.group);
               rig.dispose();
             }
-            rig = createPlayerAvatar(p.name, p.color);
+            rig = createPlayerAvatar(p.name, p.color, p.skin);
             scene.add(rig.group);
-            avatars.set(p.id, rig);
+            avatars.set(p.id, { rig, color: p.color, skin: p.skin, name: p.name });
           }
+          if (!rig) continue;
 
           const rm = remoteMotionRef.current.get(p.id);
           const targetX = rm ? rm.x : p.x;
@@ -681,7 +655,7 @@ export function FirstPersonViewport({
         }
 
         // Clean up departed players
-        for (const [id, rig] of [...avatars.entries()]) {
+        for (const [id, { rig }] of avatars) {
           if (!activeIds.has(id)) {
             scene.remove(rig.group);
             rig.dispose();
@@ -726,11 +700,11 @@ export function FirstPersonViewport({
           if (termId === 'ele_lights' && snap.lightsOut) {
             mat.color.set('#ef4444');
             mat.emissive.set('#ef4444');
-            mat.emissiveIntensity = 1.6 + Math.sin(elapsed * 8) * 0.6;
+            mat.emissiveIntensity = 1.6;
           } else if (activeTermIds.has(termId)) {
             mat.color.set('#f59e0b');
             mat.emissive.set('#f59e0b');
-            mat.emissiveIntensity = 1.4 + Math.sin(elapsed * 4) * 0.35;
+            mat.emissiveIntensity = 1.4;
           } else {
             mat.color.set('#334155');
             mat.emissive.set('#38bdf8');
@@ -738,28 +712,42 @@ export function FirstPersonViewport({
           }
         });
 
-        // Update HUD telemetry at <= 8Hz (never 60Hz setState!)
-        if (now - lastTelemetryEmitAt > 125) {
-          lastTelemetryEmitAt = now;
-          updateInteractions(snap, localPos.x, localPos.z);
-          propsRef.current.onTelemetryChange({
-            roomId: getRoomAt(localPos.x, localPos.z),
-            playerX: localPos.x,
-            playerZ: localPos.z,
-            playerYaw: localPos.yaw,
-            nearbyInteraction: lastNearbyInteraction,
-            nearbyBodyId: lastNearbyBodyId,
-            nearbyAttackTarget: lastAttackTarget,
-            pointerLocked,
-          });
-        }
       }
 
-      renderer.render(scene, camera);
+      // Telemetry and keyboard actions remain available without a WebGL context.
+      if (now - lastTelemetryEmitAt > 125) {
+        lastTelemetryEmitAt = now;
+        if (curMode === 'playing' && gate === null) {
+          updateInteractions(snap, localPos.x, localPos.z);
+        } else {
+          lastNearbyInteraction = null;
+          lastNearbyBodyId = null;
+          lastAttackTarget = null;
+        }
+        propsRef.current.onTelemetryChange({
+          roomId: getRoomAt(localPos.x, localPos.z),
+          playerX: localPos.x,
+          playerZ: localPos.z,
+          playerYaw: localPos.yaw,
+          nearbyInteraction: lastNearbyInteraction,
+          nearbyBodyId: lastNearbyBodyId,
+          nearbyAttackTarget: lastAttackTarget,
+          pointerLocked,
+          graphicsUnavailable: !renderer || contextLost,
+        });
+      }
 
-      if (isSoftwareGl) {
-        afterDraw(tick);
+      if (renderer && isSoftwareGl && !contextLost) {
+        const gl = renderer.getContext() as WebGL2RenderingContext;
+        frameId = window.setTimeout(tick, 33);
+        // Avoid queueing frames faster than a software renderer can complete them.
+        if (sync && gl.getSyncParameter(sync, gl.SYNC_STATUS) === gl.UNSIGNALED) return;
+        if (sync) gl.deleteSync(sync);
+        renderer.render(scene, camera);
+        sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+        gl.flush();
       } else {
+        if (!contextLost) renderer?.render(scene, camera);
         frameId = requestAnimationFrame(tick);
       }
     }
@@ -770,31 +758,45 @@ export function FirstPersonViewport({
       disposed = true;
       cancelAnimationFrame(frameId);
       clearTimeout(frameId);
-      renderer.domElement.removeEventListener('webglcontextlost', onContextLost);
-      renderer.domElement.removeEventListener('click', onCanvasClick);
+      resetInput();
+      resetInputRef.current = null;
+      canvas.removeEventListener('webglcontextlost', onContextLost);
+      canvas.removeEventListener('webglcontextrestored', onContextRestored);
+      container.removeEventListener('pointerdown', onPointerDown);
+      container.removeEventListener('pointermove', onPointerMove);
+      container.removeEventListener('pointerup', onPointerEnd);
+      container.removeEventListener('pointercancel', onPointerEnd);
+      container.removeEventListener('lostpointercapture', onPointerEnd);
       document.removeEventListener('pointerlockchange', onPointerLockChange);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      document.removeEventListener('focusin', onFocusIn);
       window.removeEventListener('mousemove', onMouseMove);
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
-      window.removeEventListener('blur', onBlur);
+      window.removeEventListener('blur', resetInput);
       window.removeEventListener('resize', onResize);
 
-      avatars.forEach((rig) => rig.dispose());
+      avatars.forEach(({ rig }) => rig.dispose());
       bodyMeshes.forEach((bm) => bm.dispose());
-      station.disposables.forEach((d) => d.dispose());
-      envTex.dispose();
-      renderer.dispose();
-      if (renderer.domElement.parentNode === container) {
-        container.removeChild(renderer.domElement);
-      }
+      station?.disposables.forEach((d) => d.dispose());
+      environment?.dispose();
+      if (sync && !contextLost) (renderer?.getContext() as WebGL2RenderingContext | undefined)?.deleteSync(sync);
+      keyLight.shadow.dispose();
+      renderer?.dispose();
+      renderer?.forceContextLoss();
+      canvas.remove();
     };
   }, [remoteMotionRef]);
 
+  const walking = (mode === 'playing' || mode === 'lobby') && !panelOpen && gateStartedAt === null;
   return (
-    <div
-      ref={mountRef}
-      data-testid="station-3d-viewport"
-      className="fixed inset-0 w-full h-full select-none"
-    />
+    <div ref={mountRef} data-testid="station-3d-viewport" data-phase={mode} className="station-viewport fixed inset-0 select-none">
+      {graphicsUnavailable && walking && (
+        <p className="station-graphics-fallback" role="status">
+          3D недоступно в этом браузере.{mode === 'playing' && ' Положение экипажа можно проверить на карте.'}
+        </p>
+      )}
+      {touchAvailable && walking && <TouchJoystick knobRef={knobRef} />}
+    </div>
   );
 }

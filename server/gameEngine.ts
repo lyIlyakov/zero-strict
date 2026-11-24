@@ -22,7 +22,11 @@ import {
   type ServerChallengeRecord,
 } from '../shared/tasks';
 import {
+  DEFAULT_ROOM_SETTINGS,
   PLAYER_COLORS,
+  ROOM_SETTINGS_LIMITS,
+  SKIN_IDS,
+  type ActionResponse,
   type BodyMarker,
   type ChatMessage,
   type ClientTaskState,
@@ -35,25 +39,28 @@ import {
   type PublicPlayerState,
   type Role,
   type RoomId,
+  type RoomSettings,
   type RoomSnapshot,
+  type SkinId,
   type SensorEchoSnapshot,
   type ShieldEventNotice,
   type ShieldUnlockReason,
   type TaskTypeId,
 } from '../shared/types';
 
-export const MIN_PLAYERS = 4;
-export const MAX_PLAYERS = 8;
+export const MIN_PLAYERS = ROOM_SETTINGS_LIMITS.maxPlayers.min;
+export const MAX_PLAYERS = ROOM_SETTINGS_LIMITS.maxPlayers.max;
 export const RECONNECT_WINDOW_MS = 30_000;
-export const KILL_COOLDOWN_MS = 22_000;
+export const KILL_COOLDOWN_MS = DEFAULT_ROOM_SETTINGS.killCooldownSeconds * 1000;
 export const INITIAL_KILL_COOLDOWN_MS = 12_000;
 export const SABOTAGE_COOLDOWN_MS = 32_000;
 export const INITIAL_SABOTAGE_COOLDOWN_MS = 15_000;
 export const SHIELD_DURATION_MS = 2_000;
 export const SHIELD_SLOW_DURATION_MS = 3_000;
-export const MEETING_DURATION_MS = 60_000;
+export const MEETING_DURATION_MS = DEFAULT_ROOM_SETTINGS.meetingSeconds * 1000;
 export const MEETING_RESULT_DELAY_MS = 5_000;
 export const BASE_MOVE_SPEED = 6.2; // meters per second
+const LOBBY_BOUND = 5.5;
 
 interface InternalTaskStage {
   roomId: RoomId;
@@ -77,6 +84,7 @@ interface InternalPlayer {
   sessionToken: string;
   name: string;
   color: string;
+  skin: SkinId;
   isHost: boolean;
   role: Role | null;
   status: PlayerStatus;
@@ -127,6 +135,10 @@ export interface EngineOptions {
   callbacks?: EngineCallbacks;
 }
 
+function isValidRoomSettingNumber(value: unknown, limits: { min: number; max: number }): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= limits.min && value <= limits.max;
+}
+
 function sanitizeName(raw: string): string {
   const trimmed = raw.trim().replace(/\s+/g, ' ').slice(0, 18);
   return trimmed;
@@ -163,6 +175,7 @@ export class RoomGameEngine {
   private readonly rng: () => number;
   private readonly callbacks: EngineCallbacks;
 
+  private settings: RoomSettings = { ...DEFAULT_ROOM_SETTINGS };
   private players = new Map<string, InternalPlayer>();
   private bodies: BodyMarker[] = [];
 
@@ -245,8 +258,8 @@ export class RoomGameEngine {
       return { ok: false, error: 'Матч уже идёт. Дождитесь завершения смены.' };
     }
     const currentCount = [...this.players.values()].filter((p) => !p.permanentlyLeft).length;
-    if (currentCount >= MAX_PLAYERS) {
-      return { ok: false, error: 'В комнате уже максимум игроков (8).' };
+    if (currentCount >= this.settings.maxPlayers) {
+      return { ok: false, error: `В комнате нет свободных мест. Лимит: ${this.settings.maxPlayers}.` };
     }
 
     const id = `p_${crypto.randomBytes(6).toString('hex')}`;
@@ -260,6 +273,7 @@ export class RoomGameEngine {
       sessionToken,
       name,
       color: this.pickAvailableColor(),
+      skin: 'standard',
       isHost,
       role: null,
       status: 'alive',
@@ -302,6 +316,60 @@ export class RoomGameEngine {
       return { ok: false, error: 'Этот цвет уже занят другим игроком.' };
     }
     player.color = colorHex;
+    this.emitStateChange();
+    return { ok: true };
+  }
+
+  selectSkin(playerId: string, skin: unknown): ActionResponse {
+    if (this.phase !== 'lobby') return { ok: false, error: 'Скафандр можно менять только в лобби.' };
+    const player = this.players.get(playerId);
+    if (!player?.connected) return { ok: false, error: 'Игрок не найден.' };
+    const selected = SKIN_IDS.find((id) => id === skin);
+    if (!selected) return { ok: false, error: 'Неизвестная модель скафандра.' };
+    if (player.skin !== selected) {
+      player.skin = selected;
+      this.emitStateChange();
+    }
+    return { ok: true };
+  }
+
+  updateSettings(playerId: string, patch: unknown): ActionResponse {
+    if (this.phase !== 'lobby') return { ok: false, error: 'Правила можно менять только в лобби.' };
+    const player = this.players.get(playerId);
+    if (!player?.connected || !player.isHost) {
+      return { ok: false, error: 'Только хозяин комнаты может менять правила.' };
+    }
+    if (!patch || typeof patch !== 'object' || Array.isArray(patch) || Object.keys(patch).length === 0) {
+      return { ok: false, error: 'Укажите настройки комнаты.' };
+    }
+
+    const next = { ...this.settings };
+    for (const [key, value] of Object.entries(patch)) {
+      switch (key) {
+        case 'maxPlayers':
+        case 'meetingSeconds':
+        case 'killCooldownSeconds': {
+          const limits = ROOM_SETTINGS_LIMITS[key];
+          if (!isValidRoomSettingNumber(value, limits)) {
+            return { ok: false, error: `Укажите целое значение от ${limits.min} до ${limits.max}.` };
+          }
+          next[key] = value;
+          break;
+        }
+        case 'emergencyEnabled':
+          if (typeof value !== 'boolean') {
+            return { ok: false, error: 'Некорректное значение для экстренного созыва.' };
+          }
+          next.emergencyEnabled = value;
+          break;
+        default:
+          return { ok: false, error: 'Неизвестная настройка комнаты.' };
+      }
+    }
+    if (next.maxPlayers < this.getPlayerIds().length) {
+      return { ok: false, error: 'Лимит не может быть меньше числа занятых мест.' };
+    }
+    this.settings = next;
     this.emitStateChange();
     return { ok: true };
   }
@@ -481,16 +549,16 @@ export class RoomGameEngine {
       return { ok: false, error: 'Матч уже запущен.' };
     }
     const requester = this.players.get(requesterId);
-    if (!requester || !requester.isHost) {
+    if (!requester?.connected || !requester.isHost) {
       return { ok: false, error: 'Только хозяин комнаты может запустить смену.' };
     }
     const connectedPlayers = [...this.players.values()].filter(
       (p) => !p.permanentlyLeft && p.connected,
     );
-    if (connectedPlayers.length < MIN_PLAYERS || connectedPlayers.length > MAX_PLAYERS) {
+    if (connectedPlayers.length < MIN_PLAYERS || connectedPlayers.length > this.settings.maxPlayers) {
       return {
         ok: false,
-        error: `Для запуска нужно от ${MIN_PLAYERS} до ${MAX_PLAYERS} подключённых игроков (сейчас ${connectedPlayers.length}).`,
+        error: `Для запуска нужно от ${MIN_PLAYERS} до ${this.settings.maxPlayers} подключённых игроков (сейчас ${connectedPlayers.length}).`,
       };
     }
 
@@ -580,7 +648,9 @@ export class RoomGameEngine {
     this.initialTotalCrewTasks = 0;
     this.sensorLastTrigger.clear();
 
-    // Remove players who permanently left
+    const t = this.now();
+    let spawnIndex = 0;
+    // Remove departed players and bring the remaining crew back to Command Hall.
     for (const [id, p] of [...this.players.entries()]) {
       if (p.permanentlyLeft || !p.connected) {
         this.players.delete(id);
@@ -595,6 +665,12 @@ export class RoomGameEngine {
         p.sabotageCooldownUntil = 0;
         p.slowedUntil = 0;
         p.emergencyUsed = false;
+        const spawn = SPAWN_POINTS[spawnIndex++ % SPAWN_POINTS.length];
+        p.x = spawn.x;
+        p.z = spawn.z;
+        p.yaw = spawn.yaw;
+        p.lastMoveAt = t;
+        p.lastRoomId = 'command';
       }
     }
 
@@ -619,13 +695,18 @@ export class RoomGameEngine {
     if (!Number.isFinite(targetX) || !Number.isFinite(targetZ) || !Number.isFinite(yaw)) return false;
 
     const t = this.now();
-    const dt = Math.max(0.016, Math.min(0.35, (t - player.lastMoveAt) / 1000));
-    player.lastMoveAt = t;
+    const inLobby = this.phase === 'lobby';
+    const elapsed = Math.max(0, Math.min(0.35, (t - player.lastMoveAt) / 1000));
+    player.lastMoveAt = Math.max(player.lastMoveAt, t);
 
     const isSlowed = player.role === 'saboteur' && t < player.slowedUntil;
     const maxSpeed = isSlowed ? BASE_MOVE_SPEED * 0.52 : BASE_MOVE_SPEED;
-    // Allow minor network jitter cushion (1.45x)
-    const maxStep = maxSpeed * dt * 1.45 + 0.25;
+    // Keep jitter tolerance, but never grant extra lobby distance per packet.
+    const maxStep = inLobby ? maxSpeed * elapsed * 1.45 : maxSpeed * Math.max(0.016, elapsed) * 1.45 + 0.25;
+    if (inLobby) {
+      targetX = Math.max(-LOBBY_BOUND, Math.min(LOBBY_BOUND, targetX));
+      targetZ = Math.max(-LOBBY_BOUND, Math.min(LOBBY_BOUND, targetZ));
+    }
 
     let dx = targetX - player.x;
     let dz = targetZ - player.z;
@@ -1049,7 +1130,7 @@ export class RoomGameEngine {
     }
 
     // Normal cooldown always starts whether blocked or landed
-    saboteur.killCooldownUntil = t + KILL_COOLDOWN_MS;
+    saboteur.killCooldownUntil = t + this.settings.killCooldownSeconds * 1000;
 
     // Check if target's personal shield is active at this exact server processing moment!
     if (t <= target.shieldActiveUntil) {
@@ -1099,6 +1180,9 @@ export class RoomGameEngine {
     const player = this.players.get(playerId);
     if (!player || player.permanentlyLeft || !player.connected || player.status !== 'alive') {
       return { ok: false, error: 'Только активный игрок может созвать собрание.' };
+    }
+    if (!this.settings.emergencyEnabled) {
+      return { ok: false, error: 'Экстренный созыв отключён правилами комнаты.' };
     }
     if (this.lightsOut) {
       return { ok: false, error: 'Во время отключения света кнопка экстренного собрания не работает.' };
@@ -1179,7 +1263,7 @@ export class RoomGameEngine {
       victimName: body?.victimName ?? null,
       victimRoomId: body?.roomId ?? null,
       startedAt: t,
-      endsAt: t + MEETING_DURATION_MS,
+      endsAt: t + this.settings.meetingSeconds * 1000,
       resolveAt: null,
       votes: new Map(),
       chat: [],
@@ -1192,6 +1276,9 @@ export class RoomGameEngine {
   sendMeetingChat(playerId: string, rawText: string): { ok: boolean; error?: string } {
     if (this.phase !== 'meeting' || !this.meeting) {
       return { ok: false, error: 'Чат доступен только во время собрания.' };
+    }
+    if (this.meeting.result || this.now() >= this.meeting.endsAt) {
+      return { ok: false, error: 'Обсуждение уже завершено.' };
     }
     const player = this.players.get(playerId);
     if (!player || player.permanentlyLeft || !player.connected) {
@@ -1226,7 +1313,7 @@ export class RoomGameEngine {
     if (this.phase !== 'meeting' || !this.meeting) {
       return { ok: false, error: 'Голосование не активно.' };
     }
-    if (this.meeting.result) {
+    if (this.meeting.result || this.now() >= this.meeting.endsAt) {
       return { ok: false, error: 'Голосование уже завершено.' };
     }
     const voter = this.players.get(playerId);
@@ -1444,6 +1531,7 @@ export class RoomGameEngine {
           id: p.id,
           name: p.name,
           color: p.color,
+          skin: p.skin,
           isHost: p.isHost,
           status: p.status,
           connected: p.connected,
@@ -1501,6 +1589,7 @@ export class RoomGameEngine {
       phase: this.phase,
       roundNumber: this.roundNumber,
       serverTime: this.now(),
+      settings: { ...this.settings },
       players: publicPlayers,
       bodies: this.bodies,
       lightsOut: this.lightsOut,

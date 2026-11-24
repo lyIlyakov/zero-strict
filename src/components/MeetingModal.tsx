@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
-import { AlertTriangle, Check, Send, SkipForward, Users } from 'lucide-react';
+import { Check, Send } from 'lucide-react';
 import { ROOM_BY_ID } from '../../shared/mapData';
-import type { RoomSnapshot } from '../../shared/types';
+import type { MeetingState, RoomSnapshot } from '../../shared/types';
+import { CrewPortrait } from './CrewPortrait';
+import './dock.css';
 
 interface MeetingModalProps {
   snapshot: RoomSnapshot;
@@ -9,267 +11,165 @@ interface MeetingModalProps {
   onSendChat: (text: string) => void;
 }
 
-export function MeetingModal({ snapshot, onVote, onSendChat }: MeetingModalProps) {
-  const [draft, setDraft] = useState('');
-  const [now, setNow] = useState(() => Date.now());
-  const chatEndRef = useRef<HTMLDivElement | null>(null);
+export function MeetingModal(props: MeetingModalProps) {
+  const meeting = props.snapshot.meeting;
+  return meeting ? <MeetingSession key={meeting.id} {...props} meeting={meeting} /> : null;
+}
 
-  const meeting = snapshot.meeting;
+function MeetingSession({ snapshot, meeting, onVote, onSendChat }: MeetingModalProps & { meeting: MeetingState }) {
+  const [draft, setDraft] = useState('');
+  const [selection, setSelection] = useState<string | null>(null);
+  const [sentAt, setSentAt] = useState<number | null>(null);
+  const [now, setNow] = useState(Date.now);
+  const [clockOffset] = useState(() => snapshot.serverTime - Date.now());
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const chatRef = useRef<HTMLDivElement>(null);
+  const followChat = useRef(true);
+  const ballotStatusRef = useRef<HTMLParagraphElement>(null);
 
   useEffect(() => {
+    const dialog = dialogRef.current;
+    dialog?.showModal();
+    headingRef.current?.focus();
     const id = window.setInterval(() => setNow(Date.now()), 250);
-    return () => window.clearInterval(id);
+    return () => {
+      window.clearInterval(id);
+      dialog?.close();
+    };
   }, []);
 
+  const lastMessageId = meeting.chat.at(-1)?.id;
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [meeting?.chat.length]);
+    if (followChat.current && chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
+  }, [lastMessageId]);
 
-  if (!meeting) return null;
-
-  const me = snapshot.players.find((p) => p.id === snapshot.self.playerId);
-  const canParticipate = me?.status === 'alive' && me.connected && !meeting.result;
+  const me = snapshot.players.find((player) => player.id === snapshot.self.playerId);
+  const result = meeting.result;
+  const seconds = Math.max(0, Math.ceil(((result ? meeting.resolveAt ?? now + clockOffset : meeting.endsAt) - (now + clockOffset)) / 1000));
+  const canChat = Boolean(me?.status === 'alive' && me.connected && !result && seconds > 0);
+  const voters = snapshot.players.filter((player) => player.connected && player.status === 'alive');
+  const votedCount = voters.filter((player) => meeting.votedPlayerIds.includes(player.id)).length;
   const hasVoted = meeting.myVote !== null;
+  const submitting = sentAt !== null && now - sentAt < 3500;
+  const canPick = canChat && !hasVoted && !submitting;
+  const picked = meeting.myVote ?? selection;
+  const selectedPlayer = snapshot.players.find(({ id }) => id === picked && id !== 'skip');
+  const validSelection = selection === 'skip' || selectedPlayer?.status === 'alive';
+  const choiceLabel = picked === 'skip' ? 'Пропустить голосование' : selectedPlayer?.name;
+  const victimRoom = meeting.victimRoomId ? ROOM_BY_ID[meeting.victimRoomId].name : 'Коридор';
+  const resultText = result?.outcome === 'ejected' ? `Исключён игрок ${result.ejectedPlayerName ?? 'без позывного'}.`
+    : result?.outcome === 'tie' ? 'Ничья. Никто не выбывает.' : 'Голосование пропущено. Никто не выбывает.';
 
-  const remainingSec = meeting.result
-    ? Math.max(0, Math.ceil(((meeting.resolveAt ?? now) - now) / 1000))
-    : Math.max(0, Math.ceil((meeting.endsAt - now) / 1000));
+  const handleConfirm = (event: FormEvent) => {
+    event.preventDefault();
+    if (!canPick || !validSelection || !selection || Date.now() + clockOffset >= meeting.endsAt) return;
+    setSentAt(Date.now());
+    ballotStatusRef.current?.focus({ preventScroll: true });
+    onVote(selection);
+  };
 
-  const victimRoom = meeting.victimRoomId ? ROOM_BY_ID[meeting.victimRoomId]?.name : 'коридоре';
-
-  const handleSubmitChat = (e: FormEvent) => {
-    e.preventDefault();
+  const handleChat = (event: FormEvent) => {
+    event.preventDefault();
     const text = draft.trim();
-    if (!text || !canParticipate) return;
+    if (!text || !canChat) return;
     onSendChat(text);
     setDraft('');
   };
 
+  const ballotStatus = result ? null : hasVoted ? `Голос учтён${choiceLabel ? `: ${choiceLabel}` : ''}.`
+    : !seconds ? 'Время вышло. Подводим итоги…'
+      : me?.status !== 'alive' ? 'Вы наблюдаете за собранием.'
+        : !me.connected ? 'Нет связи со станцией.'
+          : submitting ? 'Отправляем голос…'
+            : sentAt !== null ? 'Нет подтверждения. Попробуйте ещё раз.'
+              : choiceLabel && validSelection ? `Ваш выбор: ${choiceLabel}.` : 'Выберите игрока или пропуск.';
+
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-label="Собрание экипажа"
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#070b12]/92"
-    >
-      <div className="w-full max-w-[1040px] max-h-[90vh] flex flex-col bg-[#101723] border border-slate-700 rounded-lg shadow-2xl overflow-hidden">
-        {/* Header */}
-        <div className="flex flex-wrap items-center justify-between gap-4 px-6 py-4 border-b border-slate-800 bg-[#0b1019]">
-          <div className="flex items-center gap-3">
-            <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0" />
-            <div>
-              <h2 className="text-lg font-display font-bold text-slate-100">
-                {meeting.reason === 'body'
-                  ? `Найден выбывший: ${meeting.victimName ?? 'Член экипажа'}`
-                  : `Экстренное собрание — вызвал ${meeting.callerName}`}
-              </h2>
-              <p className="text-xs text-slate-400">
-                {meeting.reason === 'body'
-                  ? `Сообщил: ${meeting.callerName} · Место: ${victimRoom}`
-                  : 'Обсудите наблюдения «Эха датчика» и проголосуйте за подозреваемого или пропустите.'}
-              </p>
-            </div>
-          </div>
-
-          <div className="text-right font-mono-tabular">
-            <div className="text-xs text-slate-400">
-              {meeting.result ? 'Возврат на станцию' : 'До конца голосования'}
-            </div>
-            <div className="text-2xl font-bold text-amber-400">{remainingSec} с</div>
-          </div>
+    <dialog ref={dialogRef} className="dock-ui dock-dialog dock-meeting" aria-labelledby="dock-meeting-title"
+      onCancel={(event) => event.preventDefault()}>
+      <header className="dock-dialog__header">
+        <div>
+          <h2 id="dock-meeting-title" ref={headingRef} tabIndex={-1}>Собрание экипажа</h2>
+          <p className="dock-muted">{meeting.reason === 'body'
+            ? `Найден выбывший: ${meeting.victimName ?? 'член экипажа'} · ${victimRoom}. Сообщил: ${meeting.callerName}.`
+            : `Экстренный созыв: ${meeting.callerName}.`}</p>
         </div>
-
-        {/* Result banner if tallied */}
-        {meeting.result && (
-          <div className="px-6 py-3 bg-[#152033] border-b border-sky-500/40 text-sm font-semibold text-sky-100 flex items-center justify-between">
-            <span>
-              {meeting.result.outcome === 'ejected'
-                ? `По итогам голосования исключён: ${meeting.result.ejectedPlayerName}`
-                : meeting.result.outcome === 'tie'
-                  ? 'Ничья при голосовании — никто не выбывает.'
-                  : 'Большинство воздержалось — никто не выбывает.'}
-            </span>
-            <span className="text-xs font-mono-tabular text-slate-300">
-              Пропустили: {meeting.result.skipVotes}
-            </span>
-          </div>
-        )}
-
-        {/* Body: Candidates Left + Live Chat Right */}
-        <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-12">
-          {/* Candidates & Voting */}
-          <div className="lg:col-span-7 p-5 overflow-y-auto border-b lg:border-b-0 lg:border-r border-slate-800 space-y-3">
-            <div className="flex items-center justify-between text-xs text-slate-400">
-              <span className="flex items-center gap-1.5 font-semibold text-slate-300">
-                <Users className="w-4 h-4" />
-                Кандидаты
-              </span>
-              <span className="font-mono-tabular">
-                Проголосовало: {meeting.votedPlayerIds.length} / {snapshot.activePlayersCount}
-              </span>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-              {snapshot.players.map((p) => {
-                const isAlive = p.status === 'alive';
-                const hasCast = meeting.votedPlayerIds.includes(p.id);
-                const votesAgainst = meeting.result?.tallies[p.id] ?? 0;
-                const isMyChoice = meeting.myVote === p.id;
-
+        <div className="dock-meeting__clock">
+          <span>{result ? 'Возврат через' : 'До конца'}</span>
+          <strong role="timer" aria-label={result ? 'До возврата на станцию' : 'До конца голосования'}>
+            {Math.floor(seconds / 60)}:{String(seconds % 60).padStart(2, '0')}
+          </strong>
+        </div>
+      </header>
+      <div className="dock-meeting__body">
+        <form onSubmit={handleConfirm} className="dock-ballot">
+          <fieldset disabled={!canPick} className="dock-ballot__choices">
+            <legend>{result ? 'Итоги голосования' : 'Голосование'}</legend>
+            {result ? <p className="dock-ballot__result" role="status">{resultText}</p>
+              : <p className="dock-muted dock-ballot__count">На связи проголосовали: {votedCount} из {voters.length}</p>}
+            <ul className="dock-ballot__list">
+              {snapshot.players.map((player) => {
+                const isPicked = (result || validSelection || hasVoted) && picked === player.id;
+                const details = !player.connected ? 'Нет связи' : player.status !== 'alive' ? 'Выбыл'
+                  : meeting.votedPlayerIds.includes(player.id) ? 'Голос отдан' : 'Не голосовал';
                 return (
-                  <div
-                    key={p.id}
-                    className={`flex items-center justify-between gap-2 px-3.5 py-3 rounded-md border ${
-                      !isAlive
-                        ? 'bg-[#0a0e15] border-slate-800/70 opacity-50'
-                        : isMyChoice
-                          ? 'bg-sky-950/60 border-sky-400'
-                          : 'bg-[#0d1420] border-slate-800'
-                    }`}
-                  >
-                    <div className="flex items-center gap-2.5 min-w-0">
-                      <span
-                        className="w-4 h-4 rounded-sm shrink-0 border border-white/25"
-                        style={{ backgroundColor: p.color }}
-                      />
-                      <div className="min-w-0">
-                        <div className="text-sm font-semibold text-slate-100 truncate">
-                          {p.name}
-                          {p.id === snapshot.self.playerId ? ' (вы)' : ''}
-                        </div>
-                        <div className="text-[11px] text-slate-400">
-                          {!isAlive
-                            ? 'Выбыл (наблюдатель)'
-                            : !p.connected
-                              ? 'Нет связи'
-                              : hasCast
-                                ? 'Голос отдан'
-                                : 'Думает'}
-                        </div>
-                      </div>
-                    </div>
-
-                    {meeting.result ? (
-                      <span className="text-xs font-mono-tabular font-bold text-amber-300 shrink-0">
-                        {votesAgainst > 0 ? `${votesAgainst} гол.` : ''}
-                      </span>
-                    ) : (
-                      isAlive && (
-                        <button
-                          type="button"
-                          disabled={!canParticipate || hasVoted}
-                          onClick={() => onVote(p.id)}
-                          className={`px-3 py-1.5 rounded text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
-                            isMyChoice
-                              ? 'bg-sky-500 text-slate-950'
-                              : 'bg-[#1c2638] hover:bg-amber-500 hover:text-slate-950 disabled:opacity-40 text-slate-100'
-                          }`}
-                        >
-                          {isMyChoice ? (
-                            <span className="flex items-center gap-1">
-                              <Check className="w-3.5 h-3.5" />
-                              Выбран
-                            </span>
-                          ) : (
-                            'Голос'
-                          )}
-                        </button>
-                      )
-                    )}
-                  </div>
+                  <li key={player.id}>
+                    <label className="dock-ballot__row" data-selected={Boolean(isPicked)} data-disabled={player.status !== 'alive'}>
+                      {!result && <input type="radio" name="dock-vote" value={player.id}
+                        disabled={player.status !== 'alive'} checked={Boolean(isPicked)}
+                        onChange={() => { setSelection(player.id); setSentAt(null); }} />}
+                      <CrewPortrait color={player.color} skin={player.skin} />
+                      <span className="dock-ballot__name">{player.name}{player.id === snapshot.self.playerId ? ' (вы)' : ''}</span>
+                      {result ? <strong className="dock-ballot__tally" aria-label={`Голосов: ${result.tallies[player.id] ?? 0}`}>{result.tallies[player.id] ?? 0}</strong>
+                        : <span className="dock-ballot__state dock-muted">{details}</span>}
+                    </label>
+                  </li>
                 );
               })}
-            </div>
-
-            {/* Skip Vote Action */}
-            <div className="pt-2 flex items-center justify-between gap-3 border-t border-slate-800">
-              {!canParticipate && !meeting.result ? (
-                <span className="text-xs text-slate-400">
-                  Выбывшие наблюдатели не участвуют в голосовании.
-                </span>
-              ) : (
-                <span className="text-xs text-slate-400">
-                  {hasVoted ? 'Ваш голос учтён.' : 'Выберите подозреваемого или пропустите голосование.'}
-                </span>
-              )}
-
-              <button
-                type="button"
-                disabled={!canParticipate || hasVoted}
-                onClick={() => onVote('skip')}
-                className={`flex items-center gap-1.5 px-4 py-2 rounded-md text-xs font-semibold transition-colors whitespace-nowrap ${
-                  meeting.myVote === 'skip'
-                    ? 'bg-sky-500 text-slate-950'
-                    : 'bg-[#1c2638] hover:bg-[#27354d] disabled:opacity-40 border border-slate-600/70 text-slate-100'
-                }`}
-              >
-                <SkipForward className="w-3.5 h-3.5" />
-                Пропустить
+              <li>
+                <label className="dock-ballot__row dock-ballot__skip" data-selected={picked === 'skip'}>
+                  {!result && <input type="radio" name="dock-vote" value="skip" checked={picked === 'skip'}
+                    onChange={() => { setSelection('skip'); setSentAt(null); }} />}
+                  <span className="dock-ballot__name">Пропустить голосование</span>
+                  {result && <strong className="dock-ballot__tally" aria-label={`Пропусков: ${result.skipVotes}`}>{result.skipVotes}</strong>}
+                </label>
+              </li>
+            </ul>
+          </fieldset>
+          {!result && (
+            <div className="dock-ballot__confirm">
+              <p className="dock-muted" ref={ballotStatusRef} tabIndex={-1} role="status">{ballotStatus}</p>
+              <button type="submit" className="dock-button dock-button--primary" disabled={!canPick || !validSelection}>
+                <Check size={18} aria-hidden="true" /> Подтвердить голос
               </button>
             </div>
+          )}
+        </form>
+        <section className="dock-chat" aria-labelledby="dock-chat-title">
+          <h3 id="dock-chat-title">Обсуждение</h3>
+          <div className="dock-chat__log" ref={chatRef} role="log" aria-label="Чат экипажа" tabIndex={0}
+            onScroll={(event) => {
+              const log = event.currentTarget;
+              followChat.current = log.scrollHeight - log.scrollTop - log.clientHeight < 48;
+            }}>
+            {!meeting.chat.length && <p className="dock-muted">Сообщений пока нет. Расскажите, что заметили на станции.</p>}
+            {meeting.chat.map((message) => (
+              <div key={message.id} className="dock-chat__message">
+                <span className="dock-ballot__swatch" style={{ backgroundColor: message.senderColor }} aria-hidden="true" />
+                <div><strong>{message.senderName}</strong><p>{message.text}</p></div>
+              </div>
+            ))}
           </div>
-
-          {/* Live Discussion Chat */}
-          <div className="lg:col-span-5 flex flex-col min-h-[260px] max-h-[55vh] lg:max-h-none bg-[#0b1019]">
-            <div className="px-4 py-3 border-b border-slate-800 text-xs font-semibold text-slate-300">
-              Чат обсуждения
-            </div>
-
-            <div className="flex-1 overflow-y-auto p-4 space-y-2.5">
-              {meeting.chat.length === 0 ? (
-                <p className="text-xs text-slate-500 text-center py-6">
-                  Сообщений пока нет. Поделитесь, в каком отсеке вы были.
-                </p>
-              ) : (
-                meeting.chat.map((msg) => (
-                  <div
-                    key={msg.id}
-                    className="bg-[#111927] border border-slate-800/90 rounded-md px-3 py-2 text-xs"
-                  >
-                    <div className="flex items-center gap-2 mb-1">
-                      <span
-                        className="w-2.5 h-2.5 rounded-sm shrink-0"
-                        style={{ backgroundColor: msg.senderColor }}
-                      />
-                      <span className="font-semibold text-slate-200">{msg.senderName}</span>
-                    </div>
-                    <p className="text-slate-300 break-words leading-relaxed">{msg.text}</p>
-                  </div>
-                ))
-              )}
-              <div ref={chatEndRef} />
-            </div>
-
-            <form
-              onSubmit={handleSubmitChat}
-              className="p-3 border-t border-slate-800 flex items-center gap-2"
-            >
-              <input
-                type="text"
-                maxLength={240}
-                disabled={!canParticipate}
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                placeholder={
-                  me?.status !== 'alive'
-                    ? 'Наблюдатели не могут писать в чат'
-                    : 'Написать экипажу...'
-                }
-                aria-label="Сообщение в чат собрания"
-                className="flex-1 px-3 py-2 bg-[#0a0f18] border border-slate-700 rounded text-xs text-slate-100 placeholder:text-slate-500 disabled:opacity-50 focus:outline-none focus:border-amber-400"
-              />
-              <button
-                type="submit"
-                disabled={!canParticipate || !draft.trim()}
-                aria-label="Отправить сообщение"
-                className="p-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-40 text-slate-950 rounded"
-              >
-                <Send className="w-4 h-4" />
-              </button>
-            </form>
-          </div>
-        </div>
+          <form className="dock-chat__compose" onSubmit={handleChat}>
+            <input aria-label="Сообщение экипажу" placeholder={canChat ? 'Написать экипажу…' : 'Чат только для чтения'}
+              maxLength={240} disabled={!canChat} value={draft} onChange={(event) => setDraft(event.target.value)} />
+            <button type="submit" className="dock-button" aria-label="Отправить сообщение" disabled={!canChat || !draft.trim()}>
+              <Send size={18} aria-hidden="true" />
+            </button>
+          </form>
+        </section>
       </div>
-    </div>
+    </dialog>
   );
 }

@@ -92,6 +92,7 @@ async function startServer() {
     const session = socketSessions.get(socketId);
     if (!session) return;
     socketSessions.delete(socketId);
+    io.sockets.sockets.get(socketId)?.leave(session.roomCode);
     const engine = rooms.get(session.roomCode);
     if (!engine) return;
     if (explicitLeave) {
@@ -201,6 +202,17 @@ async function startServer() {
         return;
       }
 
+      const current = socketSessions.get(socket.id);
+      if (current && (current.roomCode !== code || current.playerId !== res.playerId)) {
+        detachSocketFromCurrentRoom(socket.id, true);
+      }
+      for (const [id, session] of socketSessions) {
+        if (id !== socket.id && session.roomCode === code && session.playerId === res.playerId) {
+          // The reconnect has already transferred ownership; don't mark the new connection offline.
+          socketSessions.delete(id);
+          io.sockets.sockets.get(id)?.leave(code);
+        }
+      }
       socket.join(code);
       socketSessions.set(socket.id, { roomCode: code, playerId: res.playerId });
       cb?.({ ok: true, roomCode: code, playerId: res.playerId });
@@ -217,11 +229,23 @@ async function startServer() {
       cb?.(engine.selectColor(session.playerId, payload.color));
     });
 
-    socket.on('room:leave', (cb) => {
+    socket.on('room:skin', (payload, cb) => {
+      if (typeof cb !== 'function') return;
       const session = socketSessions.get(socket.id);
-      if (session) {
-        socket.leave(session.roomCode);
-      }
+      const engine = session ? rooms.get(session.roomCode) : undefined;
+      if (!session || !engine) return cb({ ok: false, error: 'Сессия не найдена.' });
+      cb(engine.selectSkin(session.playerId, payload?.skin));
+    });
+
+    socket.on('room:settings', (patch, cb) => {
+      if (typeof cb !== 'function') return;
+      const session = socketSessions.get(socket.id);
+      const engine = session ? rooms.get(session.roomCode) : undefined;
+      if (!session || !engine) return cb({ ok: false, error: 'Сессия не найдена.' });
+      cb(engine.updateSettings(session.playerId, patch));
+    });
+
+    socket.on('room:leave', (cb) => {
       detachSocketFromCurrentRoom(socket.id, true);
       cb?.({ ok: true });
     });
@@ -424,7 +448,9 @@ async function startServer() {
 
   const host = process.env.HOST ?? '0.0.0.0';
   httpServer.listen(PORT, host, () => {
-    console.log(`[Нулевая смена] Сервер запущен на http://${host}:${PORT} (${IS_PROD ? 'production' : 'development'})`);
+    const address = httpServer.address();
+    const port = address && typeof address !== 'string' ? address.port : PORT;
+    console.log(`[Нулевая смена] Сервер запущен на http://${host}:${port} (${IS_PROD ? 'production' : 'development'})`);
   });
 }
 

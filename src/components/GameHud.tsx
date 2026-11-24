@@ -11,11 +11,13 @@ import {
 } from 'lucide-react';
 import { ROOM_BY_ID } from '../../shared/mapData';
 import type { RoomSnapshot, ShieldEventNotice } from '../../shared/types';
+import { useTouchAvailable } from '../game/TouchJoystick';
 import type { NearbyInteraction, ViewportHudTelemetry } from '../game/FirstPersonViewport';
 
 interface GameHudProps {
   snapshot: RoomSnapshot;
   telemetry: ViewportHudTelemetry;
+  panelOpen: boolean;
   muted: boolean;
   notice: ShieldEventNotice | null;
   actionError: string | null;
@@ -32,6 +34,7 @@ interface GameHudProps {
 export function GameHud({
   snapshot,
   telemetry,
+  panelOpen,
   muted,
   notice,
   actionError,
@@ -44,6 +47,7 @@ export function GameHud({
   onAttackTarget,
   onSabotageLights,
 }: GameHudProps) {
+  const touchAvailable = useTouchAvailable();
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
@@ -84,7 +88,7 @@ export function GameHud({
         : `Откроется при 50% ремонта (${snapshot.completedCrewTasks}/${snapshot.initialTotalCrewTasks}) или ≤ 3 активных`;
 
   return (
-    <div className="fixed inset-0 z-20 pointer-events-none select-none">
+    <div className="station-hud fixed inset-0 z-20 pointer-events-none select-none" data-touch={touchAvailable} inert={panelOpen} aria-hidden={panelOpen || undefined}>
       {/* Subtle cyan screen-edge glow while personal shield is active */}
       {shieldIsActive && (
         <div
@@ -97,7 +101,7 @@ export function GameHud({
       )}
 
       {/* Top-Left: Role, Current Room, Global Repair Progress, Active Players */}
-      <div className="fixed top-4 left-4 flex flex-col gap-2.5 max-w-[330px]">
+      <div className="station-hud-readout fixed top-4 left-4 flex flex-col gap-2.5 max-w-[330px]">
         <div className="bg-[#0c111b]/90 border border-slate-700/75 rounded-md px-3.5 py-2.5">
           <div className="flex items-center justify-between gap-4 text-xs">
             <span className="font-display font-bold tracking-wide text-slate-100">
@@ -134,7 +138,7 @@ export function GameHud({
         </div>
 
         {/* Assigned Tasks Checklist */}
-        <div className="bg-[#0c111b]/88 border border-slate-800/90 rounded-md px-3.5 py-2.5">
+        <div className="station-hud-tasks bg-[#0c111b]/88 border border-slate-800/90 rounded-md px-3.5 py-2.5">
           <div className="text-[11px] font-semibold text-slate-400 mb-1.5">
             {isSaboteur ? 'Задания для прикрытия (прогресс не дают)' : 'Ваши задания'}
           </div>
@@ -175,7 +179,7 @@ export function GameHud({
       </div>
 
       {/* Top-Center Alerts: Blackout, Observer Mode, Shield Notices */}
-      <div className="fixed top-4 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2 max-w-[460px] w-full px-4">
+      <div className="station-hud-alerts fixed top-4 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2 max-w-[460px] w-full px-4">
         {!isAlive && (
           <div className="bg-[#151c29]/95 border border-sky-500/60 rounded-md px-4 py-2 text-xs text-sky-200 text-center">
             Режим наблюдения · Вы выбыли, но можете завершать оставшиеся задания через терминалы
@@ -203,43 +207,31 @@ export function GameHud({
       </div>
 
       {/* Top-Right Compact Utility Controls */}
-      <div className="fixed top-4 right-4 flex items-center gap-2 pointer-events-auto">
+      <div className="station-hud-utilities fixed top-4 right-4 flex items-center gap-2 pointer-events-auto">
         <button
           type="button"
-          tabIndex={-1}
-          onClick={(e) => {
-            e.currentTarget.blur();
-            onToggleMap();
-          }}
-          aria-label="Открыть карту станции (Tab)"
-          title="Карта [Tab]"
+          onClick={onToggleMap}
+          aria-label="Открыть карту станции (M)"
+          title="Карта [M]"
           className="h-9 px-3 bg-[#0c111b]/90 hover:bg-[#192334] border border-slate-700/80 rounded-md text-xs font-medium text-slate-200 flex items-center gap-1.5 whitespace-nowrap"
         >
           <MapIcon className="w-4 h-4 text-sky-400" />
-          Карта [Tab]
+          Карта [M]
         </button>
         <button
           type="button"
-          tabIndex={-1}
-          onClick={(e) => {
-            e.currentTarget.blur();
-            onToggleMute();
-          }}
+          onClick={onToggleMute}
           aria-label={muted ? 'Включить звук' : 'Выключить звук'}
-          title={muted ? 'Включить звук' : 'Выключить звук'}
+          title={muted ? 'Включить звук [V]' : 'Выключить звук [V]'}
           className="w-9 h-9 bg-[#0c111b]/90 hover:bg-[#192334] border border-slate-700/80 rounded-md flex items-center justify-center text-slate-200"
         >
           {muted ? <VolumeX className="w-4 h-4 text-slate-400" /> : <Volume2 className="w-4 h-4 text-slate-200" />}
         </button>
         <button
           type="button"
-          tabIndex={-1}
-          onClick={(e) => {
-            e.currentTarget.blur();
-            onTogglePause();
-          }}
+          onClick={onTogglePause}
           aria-label="Настройки и пауза (Esc)"
-          title="Настройки [Esc]"
+          title="Настройки [P / Esc]"
           className="w-9 h-9 bg-[#0c111b]/90 hover:bg-[#192334] border border-slate-700/80 rounded-md flex items-center justify-center text-slate-200"
         >
           <Settings className="w-4 h-4" />
@@ -263,22 +255,18 @@ export function GameHud({
       </div>
 
       {/* PointerLock hint when unlocked in active game */}
-      {!telemetry.pointerLocked && (
-        <div className="fixed top-[56%] left-1/2 -translate-x-1/2 text-xs text-slate-300 bg-[#0c111b]/88 border border-slate-700/70 rounded px-3 py-1.5">
-          Кликните по экрану для обзора мышью · Стрелки ← → тоже вращают камеру
+      {!telemetry.pointerLocked && !telemetry.graphicsUnavailable && !touchAvailable && (
+        <div className="station-hud-look-hint fixed top-[56%] left-1/2 -translate-x-1/2 text-xs text-slate-300 bg-[#0c111b]/88 border border-slate-700/70 rounded px-3 py-1.5">
+          Клик по сцене — обзор мышью. Стрелки ← → и I / K — обзор с клавиатуры.
         </div>
       )}
 
       {/* Center-Bottom Contextual Interaction Prompts */}
-      <div className="fixed bottom-20 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2 pointer-events-auto">
+      <div className="station-hud-context fixed bottom-20 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2">
         {telemetry.nearbyInteraction && (
           <button
             type="button"
-            tabIndex={-1}
-            onClick={(e) => {
-              e.currentTarget.blur();
-              onInteract(telemetry.nearbyInteraction!);
-            }}
+            onClick={() => onInteract(telemetry.nearbyInteraction!)}
             className="px-4 py-2 bg-[#0e1624]/95 hover:bg-[#19263c] border border-amber-400/80 rounded-md text-sm font-semibold text-amber-200 flex items-center gap-2.5 shadow-lg"
           >
             <span className="px-1.5 py-0.5 bg-amber-400 text-slate-950 font-mono-tabular text-xs font-bold rounded">
@@ -291,11 +279,7 @@ export function GameHud({
         {telemetry.nearbyBodyId && (
           <button
             type="button"
-            tabIndex={-1}
-            onClick={(e) => {
-              e.currentTarget.blur();
-              onReportBody(telemetry.nearbyBodyId!);
-            }}
+            onClick={() => onReportBody(telemetry.nearbyBodyId!)}
             className="px-4 py-2 bg-red-950/95 hover:bg-red-900 border border-red-400/80 rounded-md text-sm font-semibold text-red-100 flex items-center gap-2.5 shadow-lg"
           >
             <span className="px-1.5 py-0.5 bg-red-400 text-slate-950 font-mono-tabular text-xs font-bold rounded">
@@ -309,12 +293,8 @@ export function GameHud({
         {isSaboteur && isAlive && telemetry.nearbyAttackTarget && (
           <button
             type="button"
-            tabIndex={-1}
             disabled={killCd > 0}
-            onClick={(e) => {
-              e.currentTarget.blur();
-              onAttackTarget(telemetry.nearbyAttackTarget!.id);
-            }}
+            onClick={() => onAttackTarget(telemetry.nearbyAttackTarget!.id)}
             className="px-4 py-2 bg-red-950/95 hover:bg-red-900 disabled:opacity-50 border border-red-500/80 rounded-md text-sm font-semibold text-red-100 flex items-center gap-2.5 shadow-lg"
           >
             <span className="px-1.5 py-0.5 bg-red-500 text-white font-mono-tabular text-xs font-bold rounded">
@@ -330,7 +310,7 @@ export function GameHud({
       </div>
 
       {/* Bottom-Left: Crew Self-Defense Shield OR Saboteur Ability Dock */}
-      <div className="fixed bottom-4 left-4 pointer-events-auto">
+      <div className="station-hud-abilities fixed bottom-4 left-4">
         {isCrew && isAlive && (
           <div className="bg-[#0c111b]/92 border border-slate-700/80 rounded-md px-3.5 py-2.5 max-w-[340px]">
             <div className="flex items-center justify-between gap-3">
@@ -361,18 +341,14 @@ export function GameHud({
               {snapshot.shieldUnlocked && snapshot.self.shieldCharge > 0 && !shieldIsActive && (
                 <button
                   type="button"
-                  tabIndex={-1}
-                  onClick={(e) => {
-                    e.currentTarget.blur();
-                    onActivateShield();
-                  }}
+                  onClick={onActivateShield}
                   className="px-2.5 py-1 bg-sky-500 hover:bg-sky-400 text-slate-950 text-xs font-bold rounded whitespace-nowrap"
                 >
                   Включить [Q]
                 </button>
               )}
             </div>
-            <p className="text-[11px] text-slate-400 mt-1 font-mono-tabular">
+            <p className="station-hud-shield-detail text-[11px] text-slate-400 mt-1 font-mono-tabular">
               {shieldReasonText}
             </p>
           </div>
@@ -380,7 +356,7 @@ export function GameHud({
 
         {isSaboteur && isAlive && (
           <div className="bg-[#0c111b]/92 border border-red-900/80 rounded-md px-3.5 py-2.5 flex items-center gap-3">
-            <div className="text-xs font-mono-tabular">
+            <div className="station-hud-attack-status text-xs font-mono-tabular">
               <div className="text-red-300 font-semibold">
                 Атака [F]: {killCd > 0 ? `${killCd} с` : 'Готова'}
               </div>
@@ -392,12 +368,8 @@ export function GameHud({
             </div>
             <button
               type="button"
-              tabIndex={-1}
               disabled={snapshot.lightsOut || sabCd > 0}
-              onClick={(e) => {
-                e.currentTarget.blur();
-                onSabotageLights();
-              }}
+              onClick={onSabotageLights}
               className="px-3 py-1.5 bg-red-600 hover:bg-red-500 disabled:bg-slate-800 disabled:text-slate-500 text-white text-xs font-semibold rounded whitespace-nowrap flex items-center gap-1.5"
             >
               <ZapOff className="w-3.5 h-3.5" />
@@ -405,7 +377,7 @@ export function GameHud({
                 ? 'Свет отключён'
                 : sabCd > 0
                   ? `Свет (${sabCd} с)`
-                  : 'Отключить свет'}
+                  : 'Отключить свет [L]'}
             </button>
           </div>
         )}

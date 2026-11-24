@@ -105,7 +105,7 @@ function completeOneTaskForPlayer(
   }
 }
 
-function create4PlayerMatch(forcedSaboteurIndex = 0) {
+function create4PlayerMatch(forcedSaboteurIndex = 0, settings?: import('../shared/types').RoomSettings) {
   let time = 100_000;
   let seed = 1;
   const rng = () => {
@@ -127,6 +127,7 @@ function create4PlayerMatch(forcedSaboteurIndex = 0) {
   const p4 = engine.addPlayer('Глеб', 's4');
   assert.equal(p1.ok && p2.ok && p3.ok && p4.ok, true);
 
+  if (settings) assert.equal(engine.updateSettings(p1.playerId!, settings).ok, true);
   const start = engine.startMatch(p1.playerId!, forcedSaboteurIndex);
   assert.equal(start.ok, true);
 
@@ -136,8 +137,153 @@ function create4PlayerMatch(forcedSaboteurIndex = 0) {
     tokens: [p1.sessionToken!, p2.sessionToken!, p3.sessionToken!, p4.sessionToken!],
     advance,
     getTime: () => time,
+    advanceWithoutTick: (ms: number) => { time += ms; },
   };
 }
+
+test('lobby movement is shared, time-bounded and confined to the command hall', () => {
+  let time = 100_000;
+  const engine = new RoomGameEngine('LOBBY1', { now: () => time });
+  const host = engine.addPlayer('Алекс', 's1').playerId!;
+  const guest = engine.addPlayer('Вера', 's2').playerId!;
+  const position = () => engine.getSnapshotForPlayer(guest)!.players.find((p) => p.id === host)!;
+
+  time += 100;
+  assert.equal(engine.movePlayer(host, 0, 3.5, 0.5), true);
+  assert.equal(position().z, 3.5);
+  assert.equal(position().yaw, 0.5);
+  for (let i = 0; i < 100; i++) engine.movePlayer(host, 0, 100, 0.5);
+  assert.ok(position().z < 4.4, 'same-timestamp packets cannot create extra movement credit');
+
+  for (let i = 0; i < 30; i++) {
+    time += 100;
+    engine.movePlayer(host, 0, 100, 0.5);
+  }
+  assert.equal(position().z, 5.5, 'stop at the closed passage');
+  for (const x of [100, -100]) {
+    for (let i = 0; i < 30; i++) {
+      time += 100;
+      engine.movePlayer(host, x, 4.6, 0.5);
+    }
+    assert.ok(Math.abs(position().x) <= 5.5 && Math.abs(position().z) <= 5.5);
+  }
+  const before = position();
+  assert.equal(engine.movePlayer(host, NaN, 0, 0), false);
+  assert.deepEqual(position(), before);
+  engine.markDisconnected(host);
+  assert.equal(engine.movePlayer(host, 0, 3.1, 0), false);
+});
+
+test('room rules are host-only, validated atomically and enforce reserved capacity', () => {
+  const engine = new RoomGameEngine('RULES1');
+  const host = engine.addPlayer('Алекс', 's1').playerId!;
+  const guest = engine.addPlayer('Вера', 's2').playerId!;
+  const rules = () => engine.getSnapshotForPlayer(guest)!.settings;
+  const defaults = { maxPlayers: 8, meetingSeconds: 60, killCooldownSeconds: 22, emergencyEnabled: true };
+  assert.deepEqual(rules(), defaults);
+  assert.equal(engine.updateSettings(guest, { maxPlayers: 4 }).ok, false);
+  assert.equal(engine.updateSettings(host, { maxPlayers: 4, meetingSeconds: 45 }).ok, true);
+  const updated = { ...defaults, maxPlayers: 4, meetingSeconds: 45 };
+  assert.deepEqual(rules(), updated);
+  for (const invalid of [null, [], {}, { unknown: true }, { maxPlayers: 1 }, { maxPlayers: 13 },
+    { meetingSeconds: 29, emergencyEnabled: false }, { meetingSeconds: 121 },
+    { killCooldownSeconds: 10.5 }, { killCooldownSeconds: 61 }, { emergencyEnabled: 'false' }]) {
+    assert.equal(engine.updateSettings(host, invalid).ok, false);
+    assert.deepEqual(rules(), updated);
+  }
+  engine.addPlayer('Борис', 's3');
+  const away = engine.addPlayer('Глеб', 's4').playerId!;
+  engine.markDisconnected(away);
+  assert.equal(engine.addPlayer('Дина', 's5').ok, false);
+  assert.equal(engine.updateSettings(host, { maxPlayers: 5 }).ok, true);
+  assert.equal(engine.addPlayer('Дина', 's5').ok, true);
+  assert.equal(engine.updateSettings(host, { maxPlayers: 4 }).ok, false, 'cannot evict a reserved place');
+  assert.equal(engine.startMatch(host).ok, true);
+  assert.equal(engine.updateSettings(host, { meetingSeconds: 60 }).ok, false);
+  assert.deepEqual(rules(), { ...updated, maxPlayers: 5 });
+});
+
+test('room capacity supports the confirmed 2–12 player range', () => {
+  const twoPlayerRoom = new RoomGameEngine('CAPACITY2');
+  const twoPlayerHost = twoPlayerRoom.addPlayer('Алекс', 's1').playerId!;
+  twoPlayerRoom.addPlayer('Вера', 's2');
+  assert.equal(twoPlayerRoom.updateSettings(twoPlayerHost, { maxPlayers: 2 }).ok, true);
+  assert.equal(twoPlayerRoom.startMatch(twoPlayerHost).ok, true);
+
+  const engine = new RoomGameEngine('CAPACITY1');
+  const host = engine.addPlayer('Алекс', 's1').playerId!;
+  const guest = engine.addPlayer('Вера', 's2').playerId!;
+  const settings = () => engine.getSnapshotForPlayer(host)!.settings;
+
+  assert.equal(engine.updateSettings(host, { maxPlayers: 2 }).ok, true);
+  assert.equal(settings().maxPlayers, 2);
+  assert.equal(engine.addPlayer('Борис', 's3').ok, false);
+  assert.equal(engine.updateSettings(host, { maxPlayers: 1 }).ok, false);
+  assert.equal(engine.updateSettings(host, { maxPlayers: 12 }).ok, true);
+  assert.equal(settings().maxPlayers, 12);
+  for (let index = 0; index < 10; index++) {
+    assert.equal(engine.addPlayer(`Игрок ${index}`, `s${index + 3}`).ok, true);
+  }
+  assert.equal(engine.addPlayer('Ещё игрок', 's13').ok, false);
+  assert.equal(engine.updateSettings(host, { maxPlayers: 13 }).ok, false);
+  assert.equal(settings().maxPlayers, 12);
+  assert.equal(engine.getSnapshotForPlayer(guest)!.settings.maxPlayers, 12);
+});
+
+test('suit selection is public, survives reconnect and rematch, and locks during play', () => {
+  const engine = new RoomGameEngine('SUITS1');
+  const host = engine.addPlayer('Алекс', 's1');
+  const hostId = host.playerId!;
+  const guest = engine.addPlayer('Вера', 's2').playerId!;
+  const suit = () => engine.getSnapshotForPlayer(guest)!.players.find((p) => p.id === hostId)!.skin;
+  assert.equal(suit(), 'standard');
+  assert.equal(engine.selectSkin(hostId, 'engineer').ok, false);
+  assert.equal(engine.selectSkin(hostId, 'survey').ok, true);
+  assert.equal(suit(), 'survey');
+  engine.markDisconnected(hostId);
+  assert.equal(engine.selectSkin(hostId, 'medic').ok, false);
+  assert.equal(engine.reconnectPlayer(host.sessionToken!, 's1_new').ok, true);
+  assert.equal(suit(), 'survey');
+  engine.addPlayer('Борис', 's3');
+  engine.addPlayer('Глеб', 's4');
+  assert.equal(engine.startMatch(guest, 1).ok, true);
+  assert.equal(engine.selectSkin(hostId, 'salvage').ok, false);
+  engine.leaveExplicitly(guest); // First in order is still the original host; index 1 is the new host.
+  assert.equal(engine.returnToLobby(hostId).ok, true);
+  assert.equal(suitAfterRematch(), 'survey');
+
+  function suitAfterRematch() {
+    return engine.getSnapshotForPlayer(hostId)!.players.find((p) => p.id === hostId)!.skin;
+  }
+});
+
+test('configured cooldown and voting duration apply in play without disabling body reports', () => {
+  const { engine, ids: [saboteur, target, caller], advance, getTime } = create4PlayerMatch(0, {
+    maxPlayers: 4, meetingSeconds: 37, killCooldownSeconds: 31, emergencyEnabled: false,
+  });
+  advance(20_000);
+  // Command's lower passage: walk up to the table and test the disabled call within range.
+  assert.equal(engine.movePlayer(caller, 1.8, 0, 0), true);
+  assert.match(engine.callEmergencyMeeting(caller).error ?? '', /отключён/);
+  for (const [id, x, z] of [[saboteur, 0, 3.1], [target, 1, 3.1], [caller, 2, 3.1]] as const) {
+    for (let i = 0; i < 8; i++) {
+      advance(250);
+      const p = engine.getSnapshotForPlayer(id)!.players.find((player) => player.id === id)!;
+      const nextX = p.z < 2.2 ? 2.8 : x;
+      assert.equal(engine.movePlayer(id, nextX, z, 0), true);
+    }
+  }
+  assert.equal(engine.attackPlayer(saboteur, target).ok, true);
+  assert.equal(engine.getSnapshotForPlayer(saboteur)!.self.killCooldownUntil - getTime(), 31_000);
+  assert.equal(engine.reportBody(caller).ok, true);
+  const meeting = engine.getSnapshotForPlayer(caller)!.meeting!;
+  assert.equal(meeting.reason, 'body');
+  assert.equal(meeting.endsAt - meeting.startedAt, 37_000);
+  advance(36_999);
+  assert.equal(engine.getSnapshotForPlayer(caller)!.meeting!.result, null);
+  advance(1);
+  assert.equal(engine.getSnapshotForPlayer(caller)!.meeting!.result?.outcome, 'skipped');
+});
 
 test('4-player shield stays locked below 50% tasks and unlocks at exact 50% without eliminations', () => {
   // 3 crew * 5 tasks = 15 initialTotalCrewTasks -> 50% threshold is 8 tasks (7*2=14 < 15; 8*2=16 >= 15)
@@ -278,6 +424,21 @@ test('multi-stage long task counts exactly once, only after final stage, and rej
   // Re-submitting same task must be rejected and not double-count
   assert.equal(engine.submitTask(crewId, longTask.taskId, 1, ans1).ok, false);
   assert.equal(engine.getSnapshotForPlayer(crewId)!.completedCrewTasks, 1);
+});
+
+test('по истечении времени голос и чат закрыты даже до следующей обработки таймера', () => {
+  const { engine, ids: [a, b], advanceWithoutTick, getTime } = create4PlayerMatch();
+  engine.setPlayerPositionForTest(b, 0, 0);
+  assert.equal(engine.callEmergencyMeeting(b).ok, true);
+  const meeting = () => engine.getSnapshotForPlayer(b)!.meeting!;
+  advanceWithoutTick(meeting().endsAt - getTime() - 1);
+  assert.equal(engine.sendMeetingChat(b, 'У шлюза').ok, true);
+  assert.equal(engine.castVote(a, 'skip').ok, true);
+  advanceWithoutTick(1);
+  assert.equal(engine.castVote(b, a).ok, false);
+  assert.equal(engine.sendMeetingChat(b, 'Поздно').ok, false);
+  assert.equal(meeting().myVote, null);
+  assert.equal(meeting().chat.length, 1);
 });
 
 test('meeting vote tie ejects nobody, double-vote rejected, reconnect within 30s works, rematch resets state', () => {

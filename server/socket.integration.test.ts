@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { createInterface } from 'node:readline';
+import { fileURLToPath } from 'node:url';
 import { Server as SocketIOServer } from 'socket.io';
 import { io as ioClient, type Socket } from 'socket.io-client';
 import type {
@@ -25,6 +29,68 @@ function waitForCondition(predicate: () => boolean, timeoutMs = 4000): Promise<v
     check();
   });
 }
+
+test('production sockets publish lobby movement, suits and validated rules', { timeout: 8000 }, async (t) => {
+  const child = spawn(process.execPath, ['--import', 'tsx', 'server.ts'], {
+    cwd: fileURLToPath(new URL('..', import.meta.url)),
+    env: { ...process.env, HOST: '127.0.0.1', PORT: '0', NODE_ENV: 'production' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const stopped = once(child, 'close');
+  const clients: TestClient[] = [];
+  t.after(async () => {
+    clients.forEach((client) => client.disconnect());
+    child.kill();
+    await stopped;
+  });
+  const lines = createInterface({ input: child.stdout });
+  const port = await new Promise<number>((resolve, reject) => {
+    let stderr = '';
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.on('error', reject);
+    child.on('close', () => reject(new Error(`Lobby server stopped: ${stderr}`)));
+    lines.on('line', (line) => {
+      const match = line.match(/http:\/\/127\.0\.0\.1:(\d+)/);
+      if (match) resolve(Number(match[1]));
+    });
+  });
+  assert.ok(port > 0, 'server exposes bound port for local socket tests');
+  const snapshots: RoomSnapshot[] = [];
+  for (let i = 0; i < 3; i++) {
+    const client: TestClient = ioClient(`http://127.0.0.1:${port}`, { transports: ['websocket'] });
+    clients.push(client);
+    client.on('room:snapshot', (snapshot) => { snapshots[i] = snapshot; });
+  }
+  await waitForCondition(() => clients.every((client) => client.connected));
+  const [host, guest, replacement] = clients;
+  const created = await host.timeout(1000).emitWithAck('room:create', { name: 'Алекс' });
+  assert.equal(created.ok, true);
+  const roomCode = created.roomCode!;
+  assert.equal((await guest.timeout(1000).emitWithAck('room:join', { roomCode, name: 'Вера' })).ok, true);
+  assert.equal((await guest.timeout(1000).emitWithAck('room:settings', { maxPlayers: 4 })).ok, false);
+  assert.equal((await host.timeout(1000).emitWithAck('room:settings', { maxPlayers: 4, meetingSeconds: 48 })).ok, true);
+  assert.equal((await host.timeout(1000).emitWithAck('room:skin', { skin: 'salvage' })).ok, true);
+  assert.equal((await host.timeout(1000).emitWithAck('room:skin', null as never)).ok, false);
+  assert.equal((await host.timeout(1000).emitWithAck('room:settings', { emergencyEnabled: 'no' } as never)).ok, false);
+  await waitForCondition(() => snapshots[1]?.settings.meetingSeconds === 48 &&
+    snapshots[1].players.find((p) => p.id === created.playerId)?.skin === 'salvage');
+
+  const moved = new Promise<Parameters<ServerToClientEvents['player:moved']>[0]>((resolve) =>
+    guest.once('player:moved', resolve),
+  );
+  host.emit('player:move', { x: 0, z: 3.2, yaw: 0.25 });
+  const pose = await moved;
+  assert.equal(pose.playerId, created.playerId);
+  assert.ok(pose.z > 3.1 && pose.z <= 3.2);
+  assert.equal(pose.yaw, 0.25);
+
+  assert.equal((await replacement.timeout(1000).emitWithAck('room:reconnect', { roomCode, sessionToken: created.sessionToken! })).ok, true);
+  assert.equal((await host.timeout(1000).emitWithAck('room:settings', { maxPlayers: 8 })).ok, false);
+  assert.equal((await host.timeout(1000).emitWithAck('room:skin', { skin: 'medic' })).ok, false);
+  host.disconnect();
+  assert.equal((await replacement.timeout(1000).emitWithAck('room:settings', { maxPlayers: 5 })).ok, true);
+  await waitForCondition(() => snapshots[1]?.settings.maxPlayers === 5);
+});
 
 test('4 independent Socket.IO clients join by room code, verify private roles, vote out saboteur, and rematch in same lobby', async () => {
   const httpServer = http.createServer();

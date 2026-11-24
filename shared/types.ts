@@ -56,10 +56,34 @@ export const PLAYER_COLORS: PlayerColorOption[] = [
   { id: 'silver', name: 'Титановый', hex: '#cbd5e1' },
 ];
 
+export const SKIN_IDS = ['standard', 'survey', 'salvage', 'medic'] as const;
+export type SkinId = (typeof SKIN_IDS)[number];
+
+export interface RoomSettings {
+  maxPlayers: number;
+  meetingSeconds: number;
+  killCooldownSeconds: number;
+  emergencyEnabled: boolean;
+}
+
+export const ROOM_SETTINGS_LIMITS = {
+  maxPlayers: { min: 2, max: 12 },
+  meetingSeconds: { min: 30, max: 120 },
+  killCooldownSeconds: { min: 10, max: 60 },
+} as const;
+
+export const DEFAULT_ROOM_SETTINGS: Readonly<RoomSettings> = {
+  maxPlayers: 8,
+  meetingSeconds: 60,
+  killCooldownSeconds: 22,
+  emergencyEnabled: true,
+};
+
 export interface PublicPlayerState {
   id: string;
   name: string;
   color: string;
+  skin: SkinId;
   isHost: boolean;
   status: PlayerStatus;
   connected: boolean;
@@ -184,6 +208,7 @@ export interface RoomSnapshot {
   phase: GamePhase;
   roundNumber: number;
   serverTime: number;
+  settings: RoomSettings;
   players: PublicPlayerState[];
   bodies: BodyMarker[];
   lightsOut: boolean;
@@ -237,6 +262,8 @@ export interface ClientToServerEvents {
     payload: { color: string },
     cb: (res: ActionResponse) => void,
   ) => void;
+  'room:skin': (payload: { skin: SkinId }, cb: (res: ActionResponse) => void) => void;
+  'room:settings': (patch: Partial<RoomSettings>, cb: (res: ActionResponse) => void) => void;
   'room:leave': (cb?: (res: ActionResponse) => void) => void;
   'game:start': (cb: (res: ActionResponse) => void) => void;
   'game:returnToLobby': (cb: (res: ActionResponse) => void) => void;

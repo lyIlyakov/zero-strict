@@ -3,6 +3,7 @@ import {
   CORRIDORS,
   DIRECTIONAL_SIGNS,
   ROOMS,
+  ROOM_BY_ID,
   SOLID_OBSTACLES,
   TERMINALS,
   WALL_HEIGHT,
@@ -11,13 +12,17 @@ import {
   type SolidObstacle,
   type TerminalPoint,
 } from '../../shared/mapData';
+import { ROOM_LANDMARK_NAMES } from './dockLandmarks';
+import type { SkinId } from '../../shared/types';
+import { createCrewPuppet } from './crewPuppet';
+import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import {
   createContactShadowTexture,
-  createDeckFloorTexture,
+  createDeckMaterial,
+  createBulkheadMaterial,
   createNameplateTexture,
   createSignTexture,
   createTerminalScreenTexture,
-  createWallPanelTexture,
 } from './textures';
 
 export interface StationSceneHandles {
@@ -26,6 +31,7 @@ export interface StationSceneHandles {
   roomLights: THREE.PointLight[];
   terminalMeshes: Map<string, THREE.Group>;
   animatedProps: Array<(elapsed: number, dt: number) => void>;
+  setGate: (progress: number) => void;
   disposables: Array<{ dispose: () => void }>;
 }
 
@@ -41,122 +47,38 @@ export function buildStation3D(anisotropy: number): StationSceneHandles {
   const terminalMeshes = new Map<string, THREE.Group>();
   const animatedProps: Array<(elapsed: number, dt: number) => void> = [];
 
-  const floorTex = createDeckFloorTexture(anisotropy);
-  const wallTex = createWallPanelTexture(anisotropy);
-  disposables.push(floorTex.map, floorTex.bumpMap, wallTex.map, wallTex.bumpMap);
+  const ceilingMat = new THREE.MeshStandardMaterial({ color: 0x303130, roughness: 0.92 });
+  const trimMat = new THREE.MeshStandardMaterial({ color: 0x282a2a, roughness: 0.84 });
+  const darkMetalMat = new THREE.MeshStandardMaterial({ color: 0x424645, roughness: 0.8 });
+  const matteCrateMat = new THREE.MeshStandardMaterial({ color: 0x757769, roughness: 0.9 });
+  const ochreMat = new THREE.MeshStandardMaterial({ color: 0xb38147, roughness: 0.83 });
+  disposables.push(ceilingMat, trimMat, darkMetalMat, matteCrateMat, ochreMat);
 
-  const ceilingMat = new THREE.MeshStandardMaterial({
-    color: 0x161d29,
-    roughness: 0.82,
-    metalness: 0.25,
-  });
-  const trimMat = new THREE.MeshStandardMaterial({
-    color: 0x101620,
-    roughness: 0.4,
-    metalness: 0.65,
-  });
-  const darkMetalMat = new THREE.MeshStandardMaterial({
-    color: 0x1d2635,
-    roughness: 0.35,
-    metalness: 0.72,
-  });
-  const matteCrateMat = new THREE.MeshStandardMaterial({
-    color: 0x475569,
-    roughness: 0.78,
-    metalness: 0.15,
-  });
-  const glassMat = new THREE.MeshStandardMaterial({
-    color: 0x7dd3fc,
-    roughness: 0.15,
-    metalness: 0.1,
-    transparent: true,
-    opacity: 0.34,
-    depthWrite: false,
-  });
-  disposables.push(ceilingMat, trimMat, darkMetalMat, matteCrateMat, glassMat);
-
-  const sharedWallMat = new THREE.MeshStandardMaterial({
-    color: 0xe2eaf5,
-    map: wallTex.map,
-    bumpMap: wallTex.bumpMap,
-    bumpScale: 0.04,
-    roughness: 0.58,
-    metalness: 0.25,
-  });
-  const sharedCorridorFloorMat = new THREE.MeshStandardMaterial({
-    color: 0xcbd5e1,
-    map: floorTex.map,
-    bumpMap: floorTex.bumpMap,
-    bumpScale: 0.04,
-    roughness: 0.62,
-    metalness: 0.28,
-  });
+  const sharedWallMat = createBulkheadMaterial();
+  const sharedCorridorFloorMat = createDeckMaterial('#53514c');
   const sharedCorridorLightMat = new THREE.MeshStandardMaterial({
-    color: 0xe0f2fe,
-    emissive: 0x93c5fd,
+    color: 0xddd8cd,
+    emissive: 0xab9e89,
     emissiveIntensity: 1.25,
     roughness: 0.25,
   });
   ceilingLightMaterials.push(sharedCorridorLightMat);
   disposables.push(sharedWallMat, sharedCorridorFloorMat, sharedCorridorLightMat);
 
-  function scalePlaneUVs(geo: THREE.PlaneGeometry, repX: number, repY: number) {
-    const uv = geo.attributes.uv;
-    for (let i = 0; i < uv.count; i++) {
-      uv.setXY(i, uv.getX(i) * repX, uv.getY(i) * repY);
-    }
-    uv.needsUpdate = true;
-  }
-
-  function scaleBoxHorizontalUVs(geo: THREE.BoxGeometry, repX: number) {
-    const uv = geo.attributes.uv;
-    for (let i = 0; i < uv.count; i++) {
-      uv.setX(i, uv.getX(i) * repX);
-    }
-    uv.needsUpdate = true;
-  }
-
-  // 1. Rooms: tinted floor plates, ceiling slabs, overhead room banners, and ceiling light strips
   for (const room of ROOMS) {
     const w = room.bounds.x2 - room.bounds.x1;
     const d = room.bounds.z2 - room.bounds.z1;
     const cx = (room.bounds.x1 + room.bounds.x2) / 2;
     const cz = (room.bounds.z1 + room.bounds.z2) / 2;
 
-    const floorMat = new THREE.MeshStandardMaterial({
-      color: new THREE.Color(room.floorTint).lerp(new THREE.Color('#ffffff'), 0.68),
-      map: floorTex.map,
-      bumpMap: floorTex.bumpMap,
-      bumpScale: 0.04,
-      roughness: 0.58,
-      metalness: 0.3,
-    });
+    const floorMat = createDeckMaterial(new THREE.Color('#55524c').lerp(new THREE.Color(room.accentColor), 0.13));
     const floorGeo = new THREE.PlaneGeometry(w, d);
-    scalePlaneUVs(floorGeo, w / 2.5, d / 2.5);
     const floorMesh = new THREE.Mesh(floorGeo, floorMat);
     floorMesh.rotation.x = -Math.PI / 2;
     floorMesh.position.set(cx, 0, cz);
     floorMesh.receiveShadow = true;
     root.add(floorMesh);
     disposables.push(floorMat, floorGeo);
-
-    // Colored floor perimeter border inlay (y = 0.02 to prevent Z-fighting)
-    const accentMat = new THREE.MeshStandardMaterial({
-      color: room.accentColor,
-      emissive: room.accentColor,
-      emissiveIntensity: 0.75,
-      roughness: 0.32,
-      metalness: 0.25,
-    });
-    disposables.push(accentMat);
-
-    const borderStripH = new THREE.BoxGeometry(w - 0.8, 0.02, 0.14);
-    const bNorth = new THREE.Mesh(borderStripH, accentMat);
-    bNorth.position.set(cx, 0.02, room.bounds.z1 + 0.55);
-    const bSouth = new THREE.Mesh(borderStripH, accentMat);
-    bSouth.position.set(cx, 0.02, room.bounds.z2 - 0.55);
-    root.add(bNorth, bSouth);
-    disposables.push(borderStripH);
 
     // Ceiling
     const ceilGeo = new THREE.PlaneGeometry(w, d);
@@ -166,17 +88,17 @@ export function buildStation3D(anisotropy: number): StationSceneHandles {
     root.add(ceilMesh);
     disposables.push(ceilGeo);
 
-    // Overhead emissive light strip
+    // Broad, diffused ceiling fixture
     const lightStripMat = new THREE.MeshStandardMaterial({
       color: room.lightColor,
-      emissive: room.lightColor,
+      emissive: new THREE.Color(room.lightColor).lerp(new THREE.Color(0x9d978b), 0.45),
       emissiveIntensity: 1.5,
       roughness: 0.25,
     });
     ceilingLightMaterials.push(lightStripMat);
     disposables.push(lightStripMat);
 
-    const stripGeo = new THREE.BoxGeometry(Math.min(w * 0.58, 5.4), 0.08, 0.48);
+    const stripGeo = new THREE.BoxGeometry(2.6, 0.1, 1.5);
     const stripMesh = new THREE.Mesh(stripGeo, lightStripMat);
     stripMesh.position.set(cx, WALL_HEIGHT - 0.05, cz);
     root.add(stripMesh);
@@ -194,7 +116,6 @@ export function buildStation3D(anisotropy: number): StationSceneHandles {
     const cz = (cor.bounds.z1 + cor.bounds.z2) / 2;
 
     const fGeo = new THREE.PlaneGeometry(w, d);
-    scalePlaneUVs(fGeo, Math.max(1, w / 2.5), Math.max(1, d / 2.5));
     const fMesh = new THREE.Mesh(fGeo, sharedCorridorFloorMat);
     fMesh.rotation.x = -Math.PI / 2;
     fMesh.position.set(cx, 0, cz);
@@ -209,12 +130,7 @@ export function buildStation3D(anisotropy: number): StationSceneHandles {
     root.add(cMesh);
     disposables.push(cGeo);
 
-    const isHorizontal = w >= d;
-    const lGeo = new THREE.BoxGeometry(
-      isHorizontal ? Math.min(w * 0.6, 5.5) : 0.3,
-      0.08,
-      isHorizontal ? 0.3 : Math.min(d * 0.6, 5.5),
-    );
+    const lGeo = new THREE.BoxGeometry(1.6, 0.08, 1.05);
     const lMesh = new THREE.Mesh(lGeo, sharedCorridorLightMat);
     lMesh.position.set(cx, WALL_HEIGHT - 0.05, cz);
     root.add(lMesh);
@@ -233,23 +149,15 @@ export function buildStation3D(anisotropy: number): StationSceneHandles {
       seg.orientation === 'h'
         ? new THREE.BoxGeometry(length + wallThickness * 0.5, WALL_HEIGHT, wallThickness)
         : new THREE.BoxGeometry(wallThickness, WALL_HEIGHT, length + wallThickness * 0.5);
-    scaleBoxHorizontalUVs(wGeo, Math.max(1, length / 3.2));
     const wMesh = new THREE.Mesh(wGeo, sharedWallMat);
     wMesh.position.set(cx, WALL_HEIGHT / 2, cz);
     wMesh.receiveShadow = true;
     root.add(wMesh);
     disposables.push(wGeo);
 
-    // Baseboard trim
-    const trimGeo =
-      seg.orientation === 'h'
-        ? new THREE.BoxGeometry(length + 0.1, 0.18, wallThickness + 0.08)
-        : new THREE.BoxGeometry(wallThickness + 0.08, 0.18, length + 0.1);
-    const trimMesh = new THREE.Mesh(trimGeo, trimMat);
-    trimMesh.position.set(cx, 0.09, cz);
-    root.add(trimMesh);
-    disposables.push(trimGeo);
   }
+
+  const setGate = addCommandGates(root, ochreMat, trimMat, disposables);
 
   // 4. Directional Corridor Wall Signs
   for (const sign of DIRECTIONAL_SIGNS) {
@@ -258,10 +166,10 @@ export function buildStation3D(anisotropy: number): StationSceneHandles {
       map: tex,
       emissiveMap: tex,
       emissive: 0xffffff,
-      emissiveIntensity: 0.7,
+      emissiveIntensity: 0.43,
       roughness: 0.35,
     });
-    const geo = new THREE.PlaneGeometry(2.45, 0.5);
+    const geo = new THREE.PlaneGeometry(3.35, 0.68);
     const mesh = new THREE.Mesh(geo, mat);
     mesh.position.set(sign.x, 3.15, sign.z);
     mesh.rotation.y = sign.yaw;
@@ -271,7 +179,7 @@ export function buildStation3D(anisotropy: number): StationSceneHandles {
 
   // 5. Composite 3–12 Part Landmark Props inside each room (matching SOLID_OBSTACLES)
   for (const obs of SOLID_OBSTACLES) {
-    const group = buildLandmarkProp(obs, darkMetalMat, matteCrateMat, glassMat, disposables, animatedProps);
+    const group = buildLandmarkProp(obs, darkMetalMat, matteCrateMat, ochreMat, disposables);
     root.add(group);
   }
 
@@ -296,8 +204,57 @@ export function buildStation3D(anisotropy: number): StationSceneHandles {
     roomLights,
     terminalMeshes,
     animatedProps,
+    setGate,
     disposables,
   };
+}
+
+function addCommandGates(
+  root: THREE.Group,
+  panel: THREE.MeshStandardMaterial,
+  frame: THREE.MeshStandardMaterial,
+  disposables: StationSceneHandles['disposables'],
+): StationSceneHandles['setGate'] {
+  // Each command exit is 4 m wide in shared/mapData. Door halves tuck into the adjoining walls.
+  const { x1, x2, z1, z2 } = ROOM_BY_ID.command.bounds;
+  const portals = [
+    [0, z1, 0], [0, z2, Math.PI], [x1, 0, Math.PI / 2], [x2, 0, -Math.PI / 2],
+  ];
+  const lamp = new THREE.MeshStandardMaterial({ color: 0xe8cda0, emissive: 0xc9a47b, emissiveIntensity: 0.42 });
+  disposables.push(lamp);
+  const leaves: Array<{ node: THREE.Group; direction: number }> = [];
+  for (const [x, z, yaw] of portals) {
+    const portal = new THREE.Group();
+    portal.position.set(x, 0, z);
+    portal.rotation.y = yaw;
+    const add = (node: THREE.Group, mat: THREE.Material, w: number, h: number, d: number, px: number, py: number, pz = 0) => {
+      const geo = new RoundedBoxGeometry(w, h, d, 1, 0.055);
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.position.set(px, py, pz);
+      node.add(mesh);
+      disposables.push(geo);
+    };
+    add(portal, frame, 4.18, 0.52, 0.54, 0, 3.52);
+    for (const direction of [-1, 1]) {
+      add(portal, frame, 0.34, 3.5, 0.52, direction * 1.98, 1.75);
+      add(portal, lamp, 0.22, 0.22, 0.12, direction * 1.98, 2.83, 0.28);
+      const node = new THREE.Group();
+      add(node, panel, 1.98, 3.3, 0.22, 0, 1.66);
+      add(node, frame, 0.54, 0.34, 0.11, direction * -0.47, 1.42, 0.13);
+      portal.add(node);
+      leaves.push({ node, direction });
+    }
+    root.add(portal);
+  }
+  const setGate = (progress: number) => {
+    const p = THREE.MathUtils.clamp(Number.isNaN(progress) ? 0 : progress, 0, 1);
+    for (const { node, direction } of leaves) {
+      node.position.x = direction * (0.99 + p * 2);
+      node.visible = p < 1;
+    }
+  };
+  setGate(1);
+  return setGate;
 }
 
 function addRoomOverheadSign(
@@ -308,7 +265,7 @@ function addRoomOverheadSign(
   anisotropy: number,
   disposables: Array<{ dispose: () => void }>,
 ): void {
-  const tex = createSignTexture(room.name.toUpperCase(), room.accentColor, anisotropy, 'ОТСЕК СТАНЦИИ КАСКАД');
+  const tex = createSignTexture(room.name.toUpperCase(), room.accentColor, anisotropy, ROOM_LANDMARK_NAMES[room.id]);
   const mat = new THREE.MeshStandardMaterial({
     map: tex,
     emissiveMap: tex,
@@ -318,8 +275,8 @@ function addRoomOverheadSign(
     side: THREE.DoubleSide,
   });
   const frameMat = new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.4, metalness: 0.7 });
-  const signGeo = new THREE.PlaneGeometry(2.9, 0.68);
-  const frameGeo = new THREE.BoxGeometry(3.02, 0.76, 0.1);
+  const signGeo = new THREE.PlaneGeometry(4.1, 0.94);
+  const frameGeo = new THREE.BoxGeometry(4.22, 1.02, 0.1);
 
   const holder = new THREE.Group();
   const frame = new THREE.Mesh(frameGeo, frameMat);
@@ -329,7 +286,7 @@ function addRoomOverheadSign(
   back.position.z = -0.056;
   back.rotation.y = Math.PI;
   holder.add(frame, front, back);
-  holder.position.set(cx, WALL_HEIGHT - 0.45, cz);
+  holder.position.set(cx, WALL_HEIGHT - 0.52, cz);
   if (room.id === 'reactor' || room.id === 'airlock') {
     holder.rotation.y = Math.PI / 2;
   }
@@ -339,216 +296,111 @@ function addRoomOverheadSign(
 
 function buildLandmarkProp(
   obs: SolidObstacle,
-  darkMetalMat: THREE.MeshStandardMaterial,
-  matteCrateMat: THREE.MeshStandardMaterial,
-  glassMat: THREE.MeshStandardMaterial,
-  disposables: Array<{ dispose: () => void }>,
-  animatedProps: Array<(elapsed: number, dt: number) => void>,
+  graphite: THREE.MeshStandardMaterial,
+  enamel: THREE.MeshStandardMaterial,
+  ochre: THREE.MeshStandardMaterial,
+  disposables: StationSceneHandles['disposables'],
 ): THREE.Group {
   const g = new THREE.Group();
-  const w = obs.bounds.x2 - obs.bounds.x1;
-  const d = obs.bounds.z2 - obs.bounds.z1;
-  const cx = (obs.bounds.x1 + obs.bounds.x2) / 2;
-  const cz = (obs.bounds.z1 + obs.bounds.z2) / 2;
-  g.position.set(cx, 0, cz);
+  const { x1, x2, z1, z2 } = obs.bounds;
+  const w = x2 - x1;
+  const d = z2 - z1;
+  g.position.set((x1 + x2) / 2, 0, (z1 + z2) / 2);
+  const part = (geo: THREE.BufferGeometry, mat: THREE.Material, x: number, y: number, z: number) => {
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.set(x, y, z);
+    disposables.push(geo);
+    g.add(mesh);
+    return mesh;
+  };
+  const box = (mat: THREE.Material, bw: number, h: number, depth: number, x: number, y: number, z: number) =>
+    part(new RoundedBoxGeometry(bw, h, depth, 1, 0.09), mat, x, y, z);
+  const color = (value: number, glow = 0) => {
+    const mat = new THREE.MeshStandardMaterial({ color: value, roughness: 0.8, emissive: value, emissiveIntensity: glow });
+    disposables.push(mat);
+    return mat;
+  };
 
-  if (obs.kind === 'table') {
-    // Command Hall circular tactical meeting table + emergency button casing
-    const pedGeo = new THREE.CylinderGeometry(0.62, 0.82, 0.78, 16);
-    const topGeo = new THREE.CylinderGeometry(1.42, 1.48, 0.16, 20);
-    const holoRingGeo = new THREE.TorusGeometry(0.95, 0.035, 10, 32);
-    const btnBaseGeo = new THREE.CylinderGeometry(0.32, 0.38, 0.14, 16);
-    const btnGeo = new THREE.CylinderGeometry(0.22, 0.24, 0.1, 16);
-
-    const holoMat = new THREE.MeshStandardMaterial({
-      color: 0x38bdf8,
-      emissive: 0x0ea5e9,
-      emissiveIntensity: 1.2,
-      roughness: 0.2,
-    });
-    const redBtnMat = new THREE.MeshStandardMaterial({
-      color: 0xef4444,
-      emissive: 0xdc2626,
-      emissiveIntensity: 0.9,
-      roughness: 0.25,
-    });
-
-    const ped = new THREE.Mesh(pedGeo, darkMetalMat);
-    ped.position.y = 0.39;
-    const top = new THREE.Mesh(topGeo, matteCrateMat);
-    top.position.y = 0.86;
-    const ring = new THREE.Mesh(holoRingGeo, holoMat);
-    ring.rotation.x = Math.PI / 2;
-    ring.position.y = 0.96;
-    const btnBase = new THREE.Mesh(btnBaseGeo, darkMetalMat);
-    btnBase.position.y = 1.01;
-    const btn = new THREE.Mesh(btnGeo, redBtnMat);
-    btn.position.y = 1.1;
-
-    g.add(ped, top, ring, btnBase, btn);
-    disposables.push(pedGeo, topGeo, holoRingGeo, btnBaseGeo, btnGeo, holoMat, redBtnMat);
-  } else if (obs.kind === 'core') {
-    // Reactor fusion core: glowing inner plasma column + 3 rotating containment rings + 4 stanchions
-    const baseGeo = new THREE.CylinderGeometry(1.6, 1.75, 0.4, 16);
-    const coreGeo = new THREE.CylinderGeometry(0.65, 0.65, 3.4, 16);
-    const ringGeo = new THREE.TorusGeometry(1.18, 0.11, 10, 24);
-    const pillarGeo = new THREE.BoxGeometry(0.26, 3.6, 0.26);
-
-    const plasmaMat = new THREE.MeshStandardMaterial({
-      color: 0xfb923c,
-      emissive: 0xf97316,
-      emissiveIntensity: 1.8,
-      roughness: 0.2,
-    });
-
-    const base = new THREE.Mesh(baseGeo, darkMetalMat);
-    base.position.y = 0.2;
-    const cap = new THREE.Mesh(baseGeo, darkMetalMat);
-    cap.position.y = 3.55;
-    const core = new THREE.Mesh(coreGeo, plasmaMat);
-    core.position.y = 1.85;
-    g.add(base, cap, core);
-
-    const rings: THREE.Mesh[] = [];
-    for (let i = 0; i < 3; i++) {
-      const r = new THREE.Mesh(ringGeo, darkMetalMat);
-      r.rotation.x = Math.PI / 2;
-      r.position.y = 0.95 + i * 0.9;
-      g.add(r);
-      rings.push(r);
+  switch (obs.kind) {
+    case 'table': {
+      // Broad octagonal briefing desk with a single guarded emergency button.
+      box(graphite, 1.33, 0.75, 1.1, 0, 0.38, 0);
+      const top = part(new THREE.CylinderGeometry(1.53, 1.5, 0.15, 8), ochre, 0, 0.82, 0);
+      top.scale.z = 0.74;
+      box(graphite, 0.62, 0.08, 0.52, 0, 0.91, 0);
+      part(new THREE.CylinderGeometry(0.21, 0.22, 0.1, 20), color(0xb6493d, 0.22), 0, 0.99, 0);
+      break;
     }
-
-    const corners = [
-      [-1.3, -1.3],
-      [1.3, -1.3],
-      [-1.3, 1.3],
-      [1.3, 1.3],
-    ];
-    for (const [px, pz] of corners) {
-      const p = new THREE.Mesh(pillarGeo, matteCrateMat);
-      p.position.set(px, 1.8, pz);
-      g.add(p);
+    case 'core': {
+      // Static ceramic pressure vessel, held in a hexagonal graphite frame.
+      part(new THREE.CylinderGeometry(1.5, 1.64, 0.36, 12), graphite, 0, 0.18, 0);
+      part(new THREE.CylinderGeometry(1.29, 1.17, 2.46, 12), ochre, 0, 1.63, 0);
+      part(new THREE.CylinderGeometry(0.84, 1.48, 0.61, 12), graphite, 0, 3.13, 0);
+      part(new THREE.CylinderGeometry(0.62, 0.77, 0.15, 12), color(0xcaa471, 0.28), 0, 3.51, 0);
+      for (let i = 0; i < 6; i++) {
+        const angle = i * Math.PI / 3;
+        const post = box(enamel, 0.28, 2.8, 0.32, 1.48 * Math.cos(angle), 1.67, 1.48 * Math.sin(angle));
+        post.rotation.y = -angle;
+      }
+      break;
     }
-
-    animatedProps.push((elapsed) => {
-      rings.forEach((r, idx) => {
-        r.rotation.z = elapsed * (0.4 + idx * 0.2) * (idx % 2 === 0 ? 1 : -1);
-      });
-      plasmaMat.emissiveIntensity = 1.5 + Math.sin(elapsed * 2.8) * 0.35;
-    });
-    disposables.push(baseGeo, coreGeo, ringGeo, pillarGeo, plasmaMat);
-  } else if (obs.kind === 'hydro_tank') {
-    // Hydroponics planter tank with glowing grow bar and low-poly flora clusters
-    const tubGeo = new THREE.BoxGeometry(w - 0.1, 0.72, d - 0.1);
-    const soilGeo = new THREE.BoxGeometry(w - 0.3, 0.1, d - 0.3);
-    const canopyGeo = new THREE.BoxGeometry(w - 0.1, 0.65, d - 0.1);
-    const stemGeo = new THREE.CylinderGeometry(0.08, 0.14, 0.55, 6);
-    const leafGeo = new THREE.OctahedronGeometry(0.28, 0);
-
-    const soilMat = new THREE.MeshStandardMaterial({ color: 0x2a1f18, roughness: 0.95 });
-    const leafMat = new THREE.MeshStandardMaterial({
-      color: 0x10b981,
-      emissive: 0x064e3b,
-      emissiveIntensity: 0.4,
-      roughness: 0.65,
-    });
-
-    const tub = new THREE.Mesh(tubGeo, darkMetalMat);
-    tub.position.y = 0.36;
-    const soil = new THREE.Mesh(soilGeo, soilMat);
-    soil.position.y = 0.73;
-    const canopy = new THREE.Mesh(canopyGeo, glassMat);
-    canopy.position.y = 1.08;
-    g.add(tub, soil, canopy);
-
-    for (let i = -1.6; i <= 1.6; i += 0.8) {
-      const stem = new THREE.Mesh(stemGeo, leafMat);
-      stem.position.set(i, 0.98, 0);
-      const crown = new THREE.Mesh(leafGeo, leafMat);
-      crown.position.set(i, 1.24, (i * 13) % 0.25);
-      g.add(stem, crown);
+    case 'hydro_tank': {
+      box(graphite, w - 0.1, 0.55, d - 0.08, 0, 0.28, 0);
+      box(color(0x596c54), w - 0.16, 0.18, d - 0.15, 0, 0.61, 0);
+      const leaf = color(0x8a9b71);
+      for (let i = -2; i <= 2; i++) {
+        const stem = part(new THREE.SphereGeometry(0.4, 9, 6), leaf, i * 0.87, 0.82, 0);
+        stem.scale.set(1.12, 0.76 + 0.06 * (i + 2), 1.2);
+        const branch = part(new THREE.SphereGeometry(0.33, 9, 6), leaf, i * 0.87 - 0.16, 0.79, 0.35);
+        branch.scale.set(1, 0.8, 1.05);
+      }
+      break;
     }
-
-    disposables.push(tubGeo, soilGeo, canopyGeo, stemGeo, leafGeo, soilMat, leafMat);
-  } else if (obs.kind === 'bed') {
-    // Medbay diagnostic pod + scanner arch
-    const frameGeo = new THREE.BoxGeometry(w - 0.1, 0.68, d - 0.2);
-    const padGeo = new THREE.BoxGeometry(w - 0.25, 0.14, d - 0.35);
-    const archGeo = new THREE.TorusGeometry(0.75, 0.08, 8, 20, Math.PI);
-    const padMat = new THREE.MeshStandardMaterial({ color: 0x0f766e, roughness: 0.72 });
-    const scanMat = new THREE.MeshStandardMaterial({
-      color: 0x2dd4bf,
-      emissive: 0x14b8a6,
-      emissiveIntensity: 1.1,
-    });
-
-    const frame = new THREE.Mesh(frameGeo, darkMetalMat);
-    frame.position.y = 0.34;
-    const pad = new THREE.Mesh(padGeo, padMat);
-    pad.position.y = 0.74;
-    const arch = new THREE.Mesh(archGeo, scanMat);
-    arch.position.set(0, 0.78, 0);
-    g.add(frame, pad, arch);
-    disposables.push(frameGeo, padGeo, archGeo, padMat, scanMat);
-  } else if (obs.kind === 'crate') {
-    // Storage stacked industrial crates with amber trim
-    const crate1Geo = new THREE.BoxGeometry(1.35, 1.05, 1.35);
-    const crate2Geo = new THREE.BoxGeometry(1.15, 0.9, 1.15);
-    const accentCrateMat = new THREE.MeshStandardMaterial({
-      color: 0xd97706,
-      roughness: 0.62,
-      metalness: 0.2,
-    });
-
-    const c1 = new THREE.Mesh(crate1Geo, matteCrateMat);
-    c1.position.set(-0.68, 0.525, 0);
-    const c2 = new THREE.Mesh(crate1Geo, darkMetalMat);
-    c2.position.set(0.68, 0.525, 0);
-    const c3 = new THREE.Mesh(crate2Geo, accentCrateMat);
-    c3.position.set(-0.2, 1.48, 0);
-    g.add(c1, c2, c3);
-    disposables.push(crate1Geo, crate2Geo, accentCrateMat);
-  } else if (obs.kind === 'transformer' || obs.kind === 'rack') {
-    // Electrical transformer / Comms server rack with glowing LEDs
-    const bodyGeo = new THREE.BoxGeometry(w - 0.12, obs.height, d - 0.12);
-    const capGeo = new THREE.BoxGeometry(w + 0.04, 0.16, d + 0.04);
-    const ledGeo = new THREE.BoxGeometry(w - 0.45, 0.1, d + 0.02);
-    const ledColor = obs.kind === 'transformer' ? 0xfacc15 : 0x60a5fa;
-    const ledMat = new THREE.MeshStandardMaterial({
-      color: ledColor,
-      emissive: ledColor,
-      emissiveIntensity: 1.2,
-    });
-
-    const body = new THREE.Mesh(bodyGeo, darkMetalMat);
-    body.position.y = obs.height / 2;
-    const cap = new THREE.Mesh(capGeo, matteCrateMat);
-    cap.position.y = obs.height + 0.08;
-    const led1 = new THREE.Mesh(ledGeo, ledMat);
-    led1.position.y = obs.height * 0.72;
-    const led2 = new THREE.Mesh(ledGeo, ledMat);
-    led2.position.y = obs.height * 0.46;
-    g.add(body, cap, led1, led2);
-    disposables.push(bodyGeo, capGeo, ledGeo, ledMat);
-  } else {
-    // Navigation / Airlock control island
-    const baseGeo = new THREE.BoxGeometry(w - 0.1, 0.95, d - 0.1);
-    const screenGeo = new THREE.BoxGeometry(w - 0.35, 0.22, d - 0.45);
-    const glowColor = obs.roomId === 'navigation' ? 0x818cf8 : 0x38bdf8;
-    const screenMat = new THREE.MeshStandardMaterial({
-      color: glowColor,
-      emissive: glowColor,
-      emissiveIntensity: 0.95,
-      roughness: 0.2,
-    });
-    const base = new THREE.Mesh(baseGeo, darkMetalMat);
-    base.position.y = 0.475;
-    const screen = new THREE.Mesh(screenGeo, screenMat);
-    screen.position.y = 1.05;
-    g.add(base, screen);
-    disposables.push(baseGeo, screenGeo, screenMat);
+    case 'bed': {
+      box(graphite, w - 0.09, 0.6, d - 0.09, 0, 0.3, 0);
+      box(color(0x94ada6), w - 0.44, 0.23, d - 0.28, 0, 0.68, 0);
+      const hood = part(new THREE.SphereGeometry(0.73, 18, 10, 0, Math.PI * 2, 0, Math.PI / 2), enamel, 0.59, 0.75, 0);
+      hood.scale.set(1, 0.36, 0.98);
+      break;
+    }
+    case 'crate': {
+      box(graphite, w - 0.06, 0.22, d - 0.05, 0, 0.12, 0);
+      box(ochre, w - 0.18, 0.87, d - 0.18, 0, 0.66, 0);
+      box(enamel, w - 0.45, 0.85, d - 0.38, -0.11, 1.53, 0);
+      box(graphite, 0.73, 0.21, 0.07, -0.11, 1.52, (d - 0.37) / 2);
+      break;
+    }
+    case 'transformer': {
+      box(graphite, w - 0.06, 0.78, d - 0.08, 0, 0.39, 0);
+      for (const x of [-0.91, 0, 0.91]) {
+        part(new THREE.CylinderGeometry(0.34, 0.39, 1.26, 12), enamel, x, 1.38, 0);
+        part(new THREE.CylinderGeometry(0.22, 0.28, 0.21, 12), ochre, x, 1.97, 0);
+      }
+      break;
+    }
+    case 'rack': {
+      box(graphite, w - 0.04, obs.height, d - 0.06, 0, obs.height / 2, 0);
+      for (const x of [-0.53, 0.53]) {
+        box(enamel, 0.91, 1.58, 0.14, x, 1.18, d / 2 - 0.11);
+      }
+      box(color(0x82a2a5, 0.25), 0.76, 0.31, 0.08, 0, 1.64, d / 2 - 0.03);
+      break;
+    }
+    case 'console': {
+      if (obs.roomId === 'airlock') {
+        box(graphite, w - 0.08, 0.23, d - 0.14, 0, 0.13, 0);
+        for (const x of [-0.64, 0.64]) {
+          part(new THREE.CylinderGeometry(0.44, 0.51, 0.74, 12), ochre, x, 0.64, 0);
+          part(new THREE.CylinderGeometry(0.29, 0.36, 0.21, 12), enamel, x, 1.09, 0);
+        }
+      } else {
+        box(graphite, w - 0.38, 0.76, d - 0.31, 0, 0.4, 0);
+        const visor = box(color(0x808ca5, 0.17), w - 0.12, 0.24, d - 0.22, 0, 0.93, 0);
+        visor.rotation.x = -0.14;
+      }
+      break;
+    }
   }
-
   return g;
 }
 
@@ -569,15 +421,15 @@ function buildTerminalProp(
 
   const accent =
     term.kind === 'lights'
-      ? '#facc15'
+      ? '#dfbd7f'
       : term.kind === 'sensor_echo'
-        ? '#38bdf8'
-        : '#f59e0b';
+        ? '#89b6b8'
+        : '#d5ae75';
 
   const pedGeo = new THREE.BoxGeometry(0.86, 1.05, 0.42);
   const topGeo = new THREE.BoxGeometry(0.96, 0.56, 0.32);
   const screenGeo = new THREE.PlaneGeometry(0.82, 0.44);
-  const beaconGeo = new THREE.BoxGeometry(0.9, 0.06, 0.06);
+  const beaconGeo = new RoundedBoxGeometry(0.19, 0.14, 0.12, 1, 0.035);
 
   const screenTex = createTerminalScreenTexture(term.label, accent, anisotropy);
   const screenMat = new THREE.MeshStandardMaterial({
@@ -593,6 +445,12 @@ function buildTerminalProp(
     emissiveIntensity: 1.15,
   });
 
+  // The viewport owns status colors; this lens uses constant radiance, not its legacy pulse.
+  beaconMat.onBeforeCompile = (shader) => {
+    shader.fragmentShader = shader.fragmentShader.replace('#include <emissivemap_fragment>',
+      'totalEmissiveRadiance = diffuseColor.rgb * 0.58;');
+  };
+
   const ped = new THREE.Mesh(pedGeo, darkMetalMat);
   ped.position.y = 0.525;
   const head = new THREE.Mesh(topGeo, darkMetalMat);
@@ -600,7 +458,7 @@ function buildTerminalProp(
   const screen = new THREE.Mesh(screenGeo, screenMat);
   screen.position.set(0, 1.34, 0.21);
   const beacon = new THREE.Mesh(beaconGeo, beaconMat);
-  beacon.position.set(0, 1.64, 0.16);
+  beacon.position.set(0.34, 1.65, 0.16);
   beacon.name = 'terminal_beacon';
 
   g.add(ped, head, screen, beacon);
@@ -618,120 +476,55 @@ export interface PlayerAvatarRig {
   dispose: () => void;
 }
 
-/**
- * Composite 8-part low-poly spacesuit avatar with grounded bottom-center pivot,
- * articulated legs, glossy tinted visor, life-support backpack, contact shadow,
- * and translucent cyan personal self-defense shield dome.
- */
-export function createPlayerAvatar(name: string, colorHex: string): PlayerAvatarRig {
+/** Four grounded crew silhouettes, sharing the same animation and gameplay rig. */
+export function createPlayerAvatar(name: string, colorHex: string, skin: SkinId = 'standard'): PlayerAvatarRig {
   const group = new THREE.Group();
-  const disposables: Array<{ dispose: () => void }> = [];
+  const disposables: StationSceneHandles['disposables'] = [];
+  const puppet = createCrewPuppet(skin, colorHex);
 
-  const suitMat = new THREE.MeshStandardMaterial({
-    color: colorHex,
-    roughness: 0.58,
-    metalness: 0.18,
-  });
-  const trimMat = new THREE.MeshStandardMaterial({
-    color: 0x1e293b,
-    roughness: 0.45,
-    metalness: 0.65,
-  });
-  const visorMat = new THREE.MeshStandardMaterial({
-    color: 0x7dd3fc,
-    emissive: 0x0c4a6e,
-    emissiveIntensity: 0.35,
-    roughness: 0.12,
-    metalness: 0.8,
-  });
+  // Keep the articulated legs' pivots at hip height so the existing walk cycle remains intact.
+  for (const leg of [puppet.leftLeg, puppet.rightLeg]) {
+    const pivotX = leg.position.x;
+    leg.geometry.translate(-pivotX, -leg.position.y, -leg.position.z);
+    leg.position.set(pivotX, 0.342, 0);
+  }
+  group.add(puppet.body, puppet.leftLeg, puppet.rightLeg);
+
   const shadowTex = createContactShadowTexture();
-  const shadowMat = new THREE.MeshBasicMaterial({
-    map: shadowTex,
-    transparent: true,
-    depthWrite: false,
-    opacity: 0.55,
-  });
-  const shieldMat = new THREE.MeshStandardMaterial({
-    color: 0x38bdf8,
-    emissive: 0x0ea5e9,
-    emissiveIntensity: 1.1,
-    transparent: true,
-    opacity: 0.32,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-  });
-  disposables.push(suitMat, trimMat, visorMat, shadowTex, shadowMat, shieldMat);
-
-  // Contact shadow disc
-  const shadowGeo = new THREE.CircleGeometry(0.55, 20);
-  const shadow = new THREE.Mesh(shadowGeo, shadowMat);
+  const shadowMat = new THREE.MeshBasicMaterial({ map: shadowTex, transparent: true, depthWrite: false, opacity: 0.55 });
+  const shadow = new THREE.Mesh(new THREE.PlaneGeometry(1.1, 1.1), shadowMat);
+  shadow.position.set(0, 0.02, 0);
   shadow.rotation.x = -Math.PI / 2;
-  shadow.position.y = 0.02;
   group.add(shadow);
 
-  // Boots + Legs
-  const legGeo = new THREE.BoxGeometry(0.2, 0.62, 0.24);
-  const leftLeg = new THREE.Mesh(legGeo, suitMat);
-  leftLeg.position.set(-0.15, 0.31, 0);
-  const rightLeg = new THREE.Mesh(legGeo, suitMat);
-  rightLeg.position.set(0.15, 0.31, 0);
-  group.add(leftLeg, rightLeg);
-
-  // Torso + chest harness
-  const torsoGeo = new THREE.BoxGeometry(0.56, 0.68, 0.34);
-  const torso = new THREE.Mesh(torsoGeo, suitMat);
-  torso.position.y = 0.96;
-  const harnessGeo = new THREE.BoxGeometry(0.58, 0.16, 0.36);
-  const harness = new THREE.Mesh(harnessGeo, trimMat);
-  harness.position.y = 0.88;
-  group.add(torso, harness);
-
-  // Backpack life-support unit
-  const packGeo = new THREE.BoxGeometry(0.42, 0.52, 0.22);
-  const pack = new THREE.Mesh(packGeo, trimMat);
-  pack.position.set(0, 1.0, 0.24);
-  group.add(pack);
-
-  // Helmet + glossy tinted visor (faces -Z forward)
-  const headGeo = new THREE.SphereGeometry(0.27, 14, 12);
-  const head = new THREE.Mesh(headGeo, suitMat);
-  head.position.set(0, 1.54, 0);
-  const visorGeo = new THREE.BoxGeometry(0.36, 0.18, 0.14);
-  const visor = new THREE.Mesh(visorGeo, visorMat);
-  visor.position.set(0, 1.55, -0.21);
-  group.add(head, visor);
-
-  // Shield dome (visible only during 2s personal shield activation)
-  const domeGeo = new THREE.SphereGeometry(0.98, 20, 14);
-  const shieldDome = new THREE.Mesh(domeGeo, shieldMat);
-  shieldDome.position.y = 0.95;
+  const shieldMat = new THREE.MeshStandardMaterial({
+    color: '#79c2cd', emissive: '#27909d', emissiveIntensity: 0.55,
+    transparent: true, opacity: 0.29, depthWrite: false, side: THREE.DoubleSide,
+  });
+  const shieldDome = new THREE.Mesh(new THREE.SphereGeometry(0.98, 20, 14), shieldMat);
+  shieldDome.position.set(0, 0.95, 0);
   shieldDome.visible = false;
   shieldDome.renderOrder = 5;
   group.add(shieldDome);
 
-  // Nameplate sprite (explicitly hidden behind walls!)
   const nameTex = createNameplateTexture(name, colorHex);
-  const nameMat = new THREE.SpriteMaterial({
-    map: nameTex,
-    depthTest: true,
-    transparent: true,
-  });
+  const nameMat = new THREE.SpriteMaterial({ map: nameTex, depthTest: true, transparent: true });
   const nameSprite = new THREE.Sprite(nameMat);
   nameSprite.scale.set(1.3, 0.34, 1);
   nameSprite.position.set(0, 2.08, 0);
   group.add(nameSprite);
 
-  disposables.push(shadowGeo, legGeo, torsoGeo, harnessGeo, packGeo, headGeo, visorGeo, domeGeo, nameTex, nameMat);
-
+  disposables.push(shadowTex, shadowMat, shadow.geometry, shieldMat, shieldDome.geometry, nameTex, nameMat);
   return {
     group,
-    leftLeg,
-    rightLeg,
+    leftLeg: puppet.leftLeg,
+    rightLeg: puppet.rightLeg,
     shieldDome,
     nameSprite,
     color: colorHex,
     dispose: () => {
-      disposables.forEach((d) => d.dispose());
+      puppet.dispose();
+      disposables.forEach((disposable) => disposable.dispose());
     },
   };
 }

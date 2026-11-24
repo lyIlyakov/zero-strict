@@ -157,6 +157,8 @@ export function CalibrateGyroTask({ payload, onSubmit }: TaskMiniGameProps) {
   const [cursor, setCursor] = useState({ x: 50, y: 50 });
   const [holdMs, setHoldMs] = useState(0);
   const cursorRef = useRef({ x: 50, y: 50 });
+  const gyroPointer = useRef<number | null>(null);
+  const holdRef = useRef(0);
   const submittedRef = useRef(false);
 
   useEffect(() => {
@@ -168,17 +170,12 @@ export function CalibrateGyroTask({ payload, onSubmit }: TaskMiniGameProps) {
       setTarget({ x: tx, y: ty });
 
       const dist = Math.hypot(cursorRef.current.x - tx, cursorRef.current.y - ty);
-      if (dist <= 13) {
-        setHoldMs((h) => {
-          const next = h + 50;
-          if (next >= requiredHoldMs && !submittedRef.current) {
-            submittedRef.current = true;
-            onSubmit({ holdMs: next });
-          }
-          return next;
-        });
-      } else {
-        setHoldMs((h) => Math.max(0, h - 25));
+      const next = dist <= 13 ? holdRef.current + 50 : Math.max(0, holdRef.current - 25);
+      holdRef.current = next;
+      setHoldMs(next);
+      if (next >= requiredHoldMs && !submittedRef.current) {
+        submittedRef.current = true;
+        onSubmit({ holdMs: next });
       }
     }, 50);
     return () => window.clearInterval(id);
@@ -187,6 +184,16 @@ export function CalibrateGyroTask({ payload, onSubmit }: TaskMiniGameProps) {
   const pct = Math.min(100, Math.round((holdMs / requiredHoldMs) * 100));
   const locked = Math.hypot(cursor.x - target.x, cursor.y - target.y) <= 13;
 
+  const positionCursor = (x: number, y: number) => {
+    const next = { x: Math.max(0, Math.min(100, x)), y: Math.max(0, Math.min(100, y)) };
+    cursorRef.current = next;
+    setCursor(next);
+  };
+  const movePointer = (event: React.PointerEvent<HTMLDivElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    positionCursor((event.clientX - rect.left) / rect.width * 100, (event.clientY - rect.top) / rect.height * 100);
+  };
+
   return (
     <div className="space-y-3">
       <div className="flex justify-between text-xs font-mono-tabular">
@@ -194,14 +201,36 @@ export function CalibrateGyroTask({ payload, onSubmit }: TaskMiniGameProps) {
         <span className={locked ? 'text-emerald-400' : 'text-amber-300'}>{pct}%</span>
       </div>
       <div
-        onMouseMove={(e) => {
-          const rect = e.currentTarget.getBoundingClientRect();
-          const x = ((e.clientX - rect.left) / rect.width) * 100;
-          const y = ((e.clientY - rect.top) / rect.height) * 100;
-          cursorRef.current = { x, y };
-          setCursor({ x, y });
+        tabIndex={0}
+        role="group"
+        aria-label="Мишень гироскопа"
+        aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight"
+        aria-describedby="gyro-controls-hint"
+        onPointerDown={(event) => {
+          if (event.pointerType !== 'mouse') {
+            if (gyroPointer.current !== null) return;
+            gyroPointer.current = event.pointerId;
+            event.currentTarget.setPointerCapture(event.pointerId);
+          }
+          movePointer(event);
         }}
-        className="relative h-56 bg-[#09101a] border border-slate-700 rounded-md overflow-hidden cursor-crosshair"
+        onPointerMove={(event) => {
+          if (event.pointerType === 'mouse' || event.pointerId === gyroPointer.current) movePointer(event);
+        }}
+        onLostPointerCapture={(event) => {
+          if (event.pointerId === gyroPointer.current) gyroPointer.current = null;
+        }}
+        onKeyDown={(event) => {
+          const moves: Record<string, [number, number]> = {
+            ArrowUp: [0, -3], ArrowDown: [0, 3], ArrowLeft: [-3, 0], ArrowRight: [3, 0],
+          };
+          const step = moves[event.key];
+          if (!step) return;
+          event.preventDefault();
+          event.stopPropagation();
+          positionCursor(cursorRef.current.x + step[0], cursorRef.current.y + step[1]);
+        }}
+        className="touch-none relative h-56 bg-[#09101a] border border-slate-700 rounded-md overflow-hidden cursor-crosshair"
       >
         {/* Target moving ring */}
         <div
@@ -216,6 +245,9 @@ export function CalibrateGyroTask({ payload, onSubmit }: TaskMiniGameProps) {
           className="absolute -translate-x-1/2 -translate-y-1/2 w-3.5 h-3.5 rounded-full bg-sky-400 pointer-events-none"
         />
       </div>
+      <p id="gyro-controls-hint" className="text-xs text-slate-300">
+        Ведите метку пальцем или мышью. С клавиатуры двигайте её стрелками.
+      </p>
     </div>
   );
 }

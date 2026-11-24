@@ -447,35 +447,47 @@ export function BalancePressureTask({ payload, onSubmit }: TaskMiniGameProps) {
   const [holdMs, setHoldMs] = useState(0);
   const [pumping, setPumping] = useState(false);
   const submittedRef = useRef(false);
-  const pumpingRef = useRef(false);
-  pumpingRef.current = pumping;
+  const heldKey = useRef<string | null>(null);
+  const heldPointer = useRef<number | null>(null);
+  const values = useRef({ pressure: 25, holdMs: 0 });
+  const stopPumping = () => {
+    heldKey.current = null;
+    heldPointer.current = null;
+    setPumping(false);
+  };
 
   useEffect(() => {
     let last = performance.now();
+    const reset = () => {
+      heldKey.current = null;
+      heldPointer.current = null;
+      setPumping(false);
+      last = performance.now();
+    };
     const id = window.setInterval(() => {
       const now = performance.now();
-      const dt = (now - last) / 1000;
+      const dt = Math.min(0.1, (now - last) / 1000);
       last = now;
-
-      setPressure((prev) => {
-        const delta = pumpingRef.current ? 38 * dt : -24 * dt;
-        const next = Math.max(0, Math.min(100, prev + delta));
-        if (next >= targetMin && next <= targetMax) {
-          setHoldMs((h) => {
-            const nh = h + dt * 1000;
-            if (nh >= requiredHoldMs && !submittedRef.current) {
-              submittedRef.current = true;
-              onSubmit({ holdMs: nh, lastValue: next });
-            }
-            return nh;
-          });
-        } else {
-          setHoldMs((h) => Math.max(0, h - dt * 500));
-        }
-        return next;
-      });
+      const held = heldKey.current !== null || heldPointer.current !== null;
+      const next = Math.max(0, Math.min(100, values.current.pressure + (held ? 38 : -24) * dt));
+      const nextHold = next >= targetMin && next <= targetMax
+        ? values.current.holdMs + dt * 1000
+        : Math.max(0, values.current.holdMs - dt * 500);
+      values.current = { pressure: next, holdMs: nextHold };
+      setPressure(next);
+      setHoldMs(nextHold);
+      if (nextHold >= requiredHoldMs && !submittedRef.current) {
+        submittedRef.current = true;
+        onSubmit({ holdMs: nextHold, lastValue: next });
+      }
     }, 50);
-    return () => window.clearInterval(id);
+    window.addEventListener('blur', reset);
+    document.addEventListener('visibilitychange', reset);
+    return () => {
+      window.clearInterval(id);
+      window.removeEventListener('blur', reset);
+      document.removeEventListener('visibilitychange', reset);
+    };
   }, [onSubmit, requiredHoldMs, targetMax, targetMin]);
 
   const inZone = pressure >= targetMin && pressure <= targetMax;
@@ -515,18 +527,43 @@ export function BalancePressureTask({ payload, onSubmit }: TaskMiniGameProps) {
 
       <button
         type="button"
-        onMouseDown={() => setPumping(true)}
-        onMouseUp={() => setPumping(false)}
-        onMouseLeave={() => setPumping(false)}
-        onTouchStart={() => setPumping(true)}
-        onTouchEnd={() => setPumping(false)}
-        className={`w-full py-3.5 rounded-md font-bold text-sm border transition-colors ${
+        onPointerDown={(event) => {
+          if (event.button !== 0 || heldPointer.current !== null) return;
+          event.currentTarget.focus({ preventScroll: true });
+          event.currentTarget.setPointerCapture(event.pointerId);
+          heldPointer.current = event.pointerId;
+          setPumping(true);
+        }}
+        onPointerUp={(event) => {
+          if (event.pointerId === heldPointer.current) stopPumping();
+        }}
+        onPointerCancel={(event) => {
+          if (event.pointerId === heldPointer.current) stopPumping();
+        }}
+        onLostPointerCapture={(event) => {
+          if (event.pointerId === heldPointer.current) stopPumping();
+        }}
+        onKeyDown={(event) => {
+          if (event.code !== 'Space' && event.code !== 'Enter') return;
+          event.preventDefault();
+          if (event.repeat) return;
+          heldKey.current = event.code;
+          setPumping(true);
+        }}
+        onKeyUp={(event) => {
+          if (event.code === heldKey.current) {
+            event.preventDefault();
+            stopPumping();
+          }
+        }}
+        onBlur={stopPumping}
+        className={`touch-none w-full py-3.5 rounded-md font-bold text-sm border transition-colors ${
           pumping
             ? 'bg-amber-400 border-amber-200 text-slate-950'
             : 'bg-[#1a2537] hover:bg-[#23324a] border-amber-400/70 text-amber-200'
         }`}
       >
-        Удерживайте для подачи давления
+        Удерживайте для подачи давления · Пробел / Enter
       </button>
     </div>
   );

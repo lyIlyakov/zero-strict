@@ -40,7 +40,7 @@ export function PauseModal({
                 className="text-xs font-semibold text-slate-300 flex items-center gap-1.5"
               >
                 <SlidersHorizontal className="w-3.5 h-3.5 text-slate-400" />
-                Чувствительность мыши
+                Чувствительность обзора
               </label>
               <span className="text-xs font-mono-tabular text-amber-300">
                 {sensitivity.toFixed(1)}x
@@ -71,9 +71,11 @@ export function PauseModal({
           </button>
 
           <div className="text-[11px] text-slate-400 font-mono-tabular space-y-1 border-t border-slate-800 pt-3">
-            <div>WASD — перемещение · Мышь / ← → — обзор</div>
+            <div>WASD — ходьба · Мышь или ← → и I / K — обзор</div>
+            <div>Джойстик слева — ходьба · Свайп справа — обзор</div>
             <div>E — взаимодействие · Q — щит · R — сообщить</div>
-            <div>Tab — схема станции · F — атака (саботажник)</div>
+            <div>F — атака · L — отключить свет (саботажник)</div>
+            <div>M — карта · P / Esc — пауза · V — звук</div>
           </div>
         </div>
 

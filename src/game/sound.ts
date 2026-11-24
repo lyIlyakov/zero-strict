@@ -5,6 +5,7 @@
 class SoundEngine {
   private ctx: AudioContext | null = null;
   private muted = false;
+  private output: GainNode | null = null;
   private lastFootstepAt = 0;
 
   private ensureContext(): AudioContext | null {
@@ -13,6 +14,8 @@ class SoundEngine {
       const Ctx = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
       if (!Ctx) return null;
       this.ctx = new Ctx();
+      this.output = this.ctx.createGain();
+      this.output.connect(this.ctx.destination);
     }
     if (this.ctx.state === 'suspended') {
       this.ctx.resume().catch(() => {});
@@ -22,6 +25,11 @@ class SoundEngine {
 
   setMuted(muted: boolean): void {
     this.muted = muted;
+    if (this.ctx && this.output) {
+      const now = this.ctx.currentTime;
+      this.output.gain.cancelScheduledValues(now);
+      this.output.gain.setValueAtTime(muted ? 0 : 1, now);
+    }
   }
 
   isMuted(): boolean {
@@ -50,9 +58,24 @@ class SoundEngine {
     gain.gain.linearRampToValueAtTime(volume, t0 + 0.012);
     gain.gain.exponentialRampToValueAtTime(0.0001, t0 + duration);
     osc.connect(gain);
-    gain.connect(ctx.destination);
+    gain.connect(this.output ?? ctx.destination);
     osc.start(t0);
     osc.stop(t0 + duration + 0.02);
+  }
+
+  playGate(): void {
+    this.playTone(92, 0.48, 'triangle', 0.042, 54);
+    this.playTone(158, 0.19, 'sine', 0.022, 82, 0.32);
+  }
+
+  playSuit(): void {
+    this.playTone(145, 0.10, 'triangle', 0.028, 94);
+    this.playTone(235, 0.09, 'sine', 0.018, 165, 0.06);
+  }
+
+  playVote(): void {
+    this.playTone(285, 0.16, 'sine', 0.038, 275);
+    this.playTone(380, 0.18, 'sine', 0.024, 355, 0.065);
   }
 
   playFootstep(): void {
